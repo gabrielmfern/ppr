@@ -77,16 +77,16 @@ fn worktreeIsClean(status_sb_output: []const u8) bool {
     return lines.next() == null;
 }
 
-fn promptEditor(text_buffer: []u8) ![]u8 {
-    return promptEditorWithScript("${EDITOR:-vi} \"$1\"", text_buffer);
+fn promptEditor(path_buffer: []u8) ![]u8 {
+    return promptEditorWithScript("${EDITOR:-vi} \"$1\"", path_buffer);
 }
 
-fn promptEditorWithScript(script: []const u8, text_buffer: []u8) ![]u8 {
+fn promptEditorWithScript(script: []const u8, path_buffer: []u8) ![]u8 {
     if (builtin.os.tag == .windows) return error.UnsupportedOperatingSystem;
 
     var path_storage: [128]u8 = undefined;
     const temp_path = try createTempEditorFile(&path_storage);
-    defer std.fs.deleteFileAbsolute(temp_path) catch {};
+    errdefer std.fs.deleteFileAbsolute(temp_path) catch {};
 
     var child = std.process.Child.init(
         &.{ "/bin/sh", "-c", script, "ppr-editor", temp_path },
@@ -103,13 +103,9 @@ fn promptEditorWithScript(script: []const u8, text_buffer: []u8) ![]u8 {
         else => return error.EditorFailed,
     }
 
-    var file = try std.fs.openFileAbsolute(temp_path, .{});
-    defer file.close();
-
-    const n = try file.readAll(text_buffer);
-    var extra: [1]u8 = undefined;
-    if (try file.read(&extra) != 0) return error.StreamTooLong;
-    return text_buffer[0..n];
+    if (temp_path.len > path_buffer.len) return error.StreamTooLong;
+    @memcpy(path_buffer[0..temp_path.len], temp_path);
+    return path_buffer[0..temp_path.len];
 }
 
 fn createTempEditorFile(path_storage: []u8) ![]u8 {
@@ -407,11 +403,12 @@ pub fn main() !void {
         return;
     }
 
-    var bodyBuffer: [1_048_576]u8 = undefined;
-    var body: []u8 = &.{};
-    if (try promptConfirmation("Write the body (y/N): ", reader, writer) orelse false) {
-        body = try promptEditor(&bodyBuffer);
-    }
+    var bodyFilePathBuffer: [128]u8 = undefined;
+    const bodyFilePath = if (try promptConfirmation("Write the body (y/N): ", reader, writer) orelse false)
+        try promptEditor(&bodyFilePathBuffer)
+    else
+        try createTempEditorFile(&bodyFilePathBuffer);
+    defer std.fs.deleteFileAbsolute(bodyFilePath) catch {};
 
     const repoResult = try shell.runCommand(
         &outputBuffer,
@@ -465,8 +462,8 @@ pub fn main() !void {
 
     const createPrResult = try shell.runCommand(
         &outputBuffer,
-        "gh pr create --base '{s}' --head '{s}' --title '{s}' --body '{s}' --reviewer '{s}'",
-        .{ base, headBranch, title, body, reviewers },
+        "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'",
+        .{ base, headBranch, title, bodyFilePath, reviewers },
     );
     if (createPrResult.exitCode != 0) return error.PullRequestCreateFailed;
 
@@ -529,25 +526,32 @@ test "promptText returns StreamTooLong when input exceeds fixed buffer" {
     );
 }
 
-test "promptEditor reads text written by editor" {
-    var text_buffer: [64]u8 = undefined;
-    const text = try promptEditorWithScript("printf 'body from editor' > \"$1\"", &text_buffer);
-    try std.testing.expectEqualStrings("body from editor", text);
+test "promptEditor returns path and editor writes text to file" {
+    var path_buffer: [256]u8 = undefined;
+    const path = try promptEditorWithScript("printf 'body from editor' > \"$1\"", &path_buffer);
+    defer std.fs.deleteFileAbsolute(path) catch {};
+
+    var file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+
+    var contents: [64]u8 = undefined;
+    const n = try file.readAll(&contents);
+    try std.testing.expectEqualStrings("body from editor", contents[0..n]);
 }
 
-test "promptEditor returns StreamTooLong for oversized text" {
-    var text_buffer: [4]u8 = undefined;
+test "promptEditor returns StreamTooLong when path buffer is too small" {
+    var path_buffer: [4]u8 = undefined;
     try std.testing.expectError(
         error.StreamTooLong,
-        promptEditorWithScript("printf 'abcdef' > \"$1\"", &text_buffer),
+        promptEditorWithScript(":", &path_buffer),
     );
 }
 
 test "promptEditor returns EditorFailed on non-zero exit" {
-    var text_buffer: [32]u8 = undefined;
+    var path_buffer: [128]u8 = undefined;
     try std.testing.expectError(
         error.EditorFailed,
-        promptEditorWithScript("exit 2", &text_buffer),
+        promptEditorWithScript("exit 2", &path_buffer),
     );
 }
 
