@@ -2,29 +2,50 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 fn promptText(
-    allocator: std.mem.Allocator,
     prompt: []const u8,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    output_buffer: []u8,
 ) ![]u8 {
     try writer.writeAll(prompt);
     try writer.flush();
 
-    var collecting: std.Io.Writer.Allocating = .init(allocator);
-    defer collecting.deinit();
-
-    _ = reader.streamDelimiterEnding(&collecting.writer, '\n') catch |err| switch (err) {
+    var collecting = std.Io.Writer.fixed(output_buffer);
+    _ = reader.streamDelimiterEnding(&collecting, '\n') catch |err| switch (err) {
         error.ReadFailed => return error.ReadFailed,
-        error.WriteFailed => return error.OutOfMemory,
+        error.WriteFailed => return error.StreamTooLong,
     };
 
     if (reader.bufferedLen() > 0 and reader.buffered()[0] == '\n') {
         reader.toss(1);
-    } else if (collecting.written().len == 0) {
+    } else if (collecting.buffered().len == 0) {
         return error.EndOfStream;
     }
 
-    return collecting.toOwnedSlice();
+    return collecting.buffered();
+}
+
+fn promptYesNo(
+    prompt: []const u8,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+) !bool {
+    var input_buffer: [16]u8 = undefined;
+
+    const text = try promptText(prompt, reader, writer, &input_buffer);
+
+    const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+    if (trimmed.len == 0) {
+        return false;
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes")) {
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "n") or std.ascii.eqlIgnoreCase(trimmed, "no")) {
+        return false;
+    }
+
+    return false;
 }
 
 const GitHub = struct {
@@ -53,7 +74,7 @@ const GitHub = struct {
     pub fn init(allocator: std.mem.Allocator) !GitHub {
         if (builtin.os.tag == .windows) return error.UnsupportedOperatingSystem;
 
-        var child = std.process.Child.init(&.{ "/bin/sh" }, allocator);
+        var child = std.process.Child.init(&.{"/bin/sh"}, allocator);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Inherit;
@@ -172,22 +193,22 @@ const GitHub = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer if (gpa.deinit() == .leak) {
-        std.log.err("Memory leak detected\n", .{});
-    };
-
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
     var stdin_buffer: [1024]u8 = undefined;
     var stdout_buffer: [1024]u8 = undefined;
     var stdin = std.fs.File.stdin().reader(&stdin_buffer);
     var stdout = std.fs.File.stdout().writer(&stdout_buffer);
 
-    const title = try promptText(allocator, "Title: ", &stdin.interface, &stdout.interface);
+    var title_buffer: [512]u8 = undefined;
+    const reader = &stdin.interface;
+    const writer = &stdout.interface;
+
+    const title = try promptText("Title: ", reader, writer, &title_buffer);
     std.log.info("title: {s}", .{title});
+
+    const willWriteBody = try promptYesNo("Want to write the body (y/N): ", reader, writer);
+    if (willWriteBody) {
+        std.log.info("body:", .{});
+    }
 }
 
 test "GitHub keeps child shell alive between commands" {
@@ -209,9 +230,9 @@ test "promptText reads one line and writes prompt" {
     var reader = std.Io.Reader.fixed("octocat\nextra");
     var output_storage: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_storage);
+    var input_storage: [32]u8 = undefined;
 
-    const text = try promptText(std.testing.allocator, "GitHub username: ", &reader, &writer);
-    defer std.testing.allocator.free(text);
+    const text = try promptText("GitHub username: ", &reader, &writer, &input_storage);
 
     try std.testing.expectEqualStrings("GitHub username: ", writer.buffered());
     try std.testing.expectEqualStrings("octocat", text);
@@ -221,10 +242,56 @@ test "promptText returns EndOfStream when no input is available" {
     var reader = std.Io.Reader.fixed("");
     var output_storage: [32]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_storage);
+    var input_storage: [32]u8 = undefined;
 
     try std.testing.expectError(
         error.EndOfStream,
-        promptText(std.testing.allocator, "> ", &reader, &writer),
+        promptText("> ", &reader, &writer, &input_storage),
     );
     try std.testing.expectEqualStrings("> ", writer.buffered());
+}
+
+test "promptText returns StreamTooLong when input exceeds fixed buffer" {
+    var reader = std.Io.Reader.fixed("this-input-is-too-long\n");
+    var output_storage: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output_storage);
+    var input_storage: [4]u8 = undefined;
+
+    try std.testing.expectError(
+        error.StreamTooLong,
+        promptText("Title: ", &reader, &writer, &input_storage),
+    );
+}
+
+test "promptYesNo accepts yes" {
+    var reader = std.Io.Reader.fixed("YeS\n");
+    var output_storage: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output_storage);
+
+    const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
+    try std.testing.expect(accepted);
+    try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
+}
+
+test "promptYesNo defaults to no on empty input" {
+    var reader = std.Io.Reader.fixed("\n");
+    var output_storage: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output_storage);
+
+    const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
+    try std.testing.expect(!accepted);
+    try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
+}
+
+test "promptYesNo retries until valid answer" {
+    var reader = std.Io.Reader.fixed("maybe\nn\n");
+    var output_storage: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output_storage);
+
+    const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
+    try std.testing.expect(!accepted);
+    try std.testing.expectEqualStrings(
+        "Continue? (y/N): Please enter yes or no.\nContinue? (y/N): ",
+        writer.buffered(),
+    );
 }
