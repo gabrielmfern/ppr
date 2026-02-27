@@ -75,7 +75,7 @@ const Config = struct {
     allocator: std.mem.Allocator,
     name: []u8,
     path: []u8,
-    reviewer_github_to_slack: std.StringArrayHashMap([]u8),
+    reviewerGithubToSlack: std.StringArrayHashMap([]u8),
     created: bool,
 
     const max_file_size = 1024 * 1024;
@@ -111,7 +111,7 @@ const Config = struct {
             .allocator = allocator,
             .name = try allocator.dupe(u8, name),
             .path = path,
-            .reviewer_github_to_slack = std.StringArrayHashMap([]u8).init(allocator),
+            .reviewerGithubToSlack = std.StringArrayHashMap([]u8).init(allocator),
             .created = false,
         };
         errdefer config.deinit();
@@ -136,25 +136,25 @@ const Config = struct {
     }
 
     pub fn deinit(self: *Config) void {
-        var it = self.reviewer_github_to_slack.iterator();
+        var it = self.reviewerGithubToSlack.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.*);
         }
-        self.reviewer_github_to_slack.deinit();
+        self.reviewerGithubToSlack.deinit();
         self.allocator.free(self.name);
         self.allocator.free(self.path);
         self.* = undefined;
     }
 
     fn putMapping(self: *Config, github_handle: []const u8, slack_handle: []const u8) !void {
-        if (self.reviewer_github_to_slack.get(github_handle) != null) return;
+        if (self.reviewerGithubToSlack.get(github_handle) != null) return;
 
         const github_copy = try self.allocator.dupe(u8, github_handle);
         errdefer self.allocator.free(github_copy);
         const slack_copy = try self.allocator.dupe(u8, slack_handle);
         errdefer self.allocator.free(slack_copy);
-        try self.reviewer_github_to_slack.put(github_copy, slack_copy);
+        try self.reviewerGithubToSlack.put(github_copy, slack_copy);
     }
 
     fn seedDefaults(self: *Config, github_reviewers: []const u8) !void {
@@ -205,7 +205,7 @@ const Config = struct {
         };
 
         try json_writer.beginObject();
-        var it = self.reviewer_github_to_slack.iterator();
+        var it = self.reviewerGithubToSlack.iterator();
         while (it.next()) |entry| {
             try json_writer.objectField(entry.key_ptr.*);
             try json_writer.write(entry.value_ptr.*);
@@ -430,6 +430,34 @@ const Shell = struct {
         return null;
     }
 };
+
+fn generateSlackMessage(
+    title: []const u8,
+    url: []const u8,
+    reviewers: [][]const u8,
+    config: *const Config,
+    buffer: []u8,
+) ![]u8 {
+    var reviewerMentionBuffer: [1024]u8 = undefined;
+    const reviewerMentions = std.ArrayList(u8).initBuffer(&reviewerMentionBuffer);
+    for (reviewers, 0..) |githubHandle, i| {
+        if (config.reviewerGithubToSlack.get(githubHandle)) |slackHandle| {
+            reviewerMentions.appendSliceAssumeCapacity("@");
+            reviewerMentions.appendSliceAssumeCapacity(slackHandle);
+        } else {
+            reviewerMentions.appendSliceAssumeCapacity("@");
+            reviewerMentions.appendSliceAssumeCapacity(githubHandle);
+        }
+        if (i < reviewers.len - 1) {
+            reviewerMentions.appendSliceAssumeCapacity(" / ");
+        }
+    }
+    return try std.fmt.bufPrint(
+        buffer,
+        ":open-pr: [{s}]({s}) {s}",
+        .{ title, url, reviewerMentions.items },
+    );
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -763,8 +791,8 @@ test "Config init creates file and defaults github handles to themselves" {
     defer config.deinit();
 
     try std.testing.expect(config.created);
-    try std.testing.expectEqualStrings("alice", config.reviewer_github_to_slack.get("alice").?);
-    try std.testing.expectEqualStrings("bob", config.reviewer_github_to_slack.get("bob").?);
+    try std.testing.expectEqualStrings("alice", config.reviewerGithubToSlack.get("alice").?);
+    try std.testing.expectEqualStrings("bob", config.reviewerGithubToSlack.get("bob").?);
 
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/.config/ppr-test.json", .{home});
     defer std.testing.allocator.free(config_path);
@@ -810,6 +838,6 @@ test "Config init loads existing reviewer to slack map" {
     defer config.deinit();
 
     try std.testing.expect(!config.created);
-    try std.testing.expectEqualStrings("@alice-in-slack", config.reviewer_github_to_slack.get("alice").?);
-    try std.testing.expect(config.reviewer_github_to_slack.get("bob") == null);
+    try std.testing.expectEqualStrings("@alice-in-slack", config.reviewerGithubToSlack.get("alice").?);
+    try std.testing.expect(config.reviewerGithubToSlack.get("bob") == null);
 }
