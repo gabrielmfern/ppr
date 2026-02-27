@@ -439,7 +439,7 @@ fn generateSlackMessage(
     buffer: []u8,
 ) ![]u8 {
     var reviewerMentionBuffer: [1024]u8 = undefined;
-    const reviewerMentions = std.ArrayList(u8).initBuffer(&reviewerMentionBuffer);
+    var reviewerMentions = std.ArrayList(u8).initBuffer(&reviewerMentionBuffer);
     for (reviewers, 0..) |githubHandle, i| {
         if (config.reviewerGithubToSlack.get(githubHandle)) |slackHandle| {
             reviewerMentions.appendSliceAssumeCapacity("@");
@@ -840,4 +840,31 @@ test "Config init loads existing reviewer to slack map" {
     try std.testing.expect(!config.created);
     try std.testing.expectEqualStrings("@alice-in-slack", config.reviewerGithubToSlack.get("alice").?);
     try std.testing.expect(config.reviewerGithubToSlack.get("bob") == null);
+}
+
+test "generateSlackMessage uses slack map and falls back to github handle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    var config = try Config.initWithHome(std.testing.allocator, "ppr-test-slack-message", home, "");
+    defer config.deinit();
+    try config.putMapping("alice", "alice.slack");
+
+    var reviewers = [_][]const u8{ "alice", "bob" };
+    var msg_buffer: [512]u8 = undefined;
+    const message = try generateSlackMessage(
+        "Fix race condition",
+        "https://github.com/acme/repo/pull/123",
+        reviewers[0..],
+        &config,
+        &msg_buffer,
+    );
+
+    try std.testing.expectEqualStrings(
+        ":open-pr: [Fix race condition](https://github.com/acme/repo/pull/123) @alice.slack / @bob",
+        message,
+    );
 }
