@@ -135,6 +135,7 @@ fn promptText(
                         }
                         return outputBuffer[0..textLen];
                     },
+                    .move_up, .move_down => {},
                     .move_left => {
                         if (cursor > 0) cursor -= 1;
                         shouldRender = true;
@@ -186,6 +187,8 @@ fn promptText(
 const PromptEscapeAction = enum {
     none,
     submit,
+    move_up,
+    move_down,
     move_left,
     move_right,
     move_home,
@@ -296,6 +299,8 @@ fn readSs3EscapeAction(reader: *std.Io.Reader) !PromptEscapeAction {
     };
 
     return switch (final) {
+        'A' => .move_up,
+        'B' => .move_down,
         'D' => .move_left,
         'C' => .move_right,
         'H' => .move_home,
@@ -333,6 +338,8 @@ fn classifyCsiEscapeAction(sequence: []const u8) PromptEscapeAction {
     const paramsText = sequence[0 .. sequence.len - 1];
 
     return switch (final) {
+        'A' => .move_up,
+        'B' => .move_down,
         'D' => classifyDirectionalEscape(paramsText, .move_left, .move_word_left, .move_home),
         'C' => classifyDirectionalEscape(paramsText, .move_right, .move_word_right, .move_end),
         'H' => .move_home,
@@ -456,6 +463,220 @@ fn normalizeCommaSeparated(input: []const u8, outputBuffer: []u8) ![]u8 {
     }
 
     return outputBuffer[0..cursor];
+}
+
+fn collectUniqueLines(input: []const u8, output: []([]const u8), outputLen: *usize) !void {
+    var lines = std.mem.splitScalar(u8, input, '\n');
+    while (lines.next()) |lineRaw| {
+        const line = std.mem.trim(u8, lineRaw, &std.ascii.whitespace);
+        if (line.len == 0) continue;
+
+        var exists = false;
+        for (output[0..outputLen.*]) |existing| {
+            if (std.mem.eql(u8, existing, line)) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) continue;
+
+        if (outputLen.* >= output.len) return error.StreamTooLong;
+        output[outputLen.*] = line;
+        outputLen.* += 1;
+    }
+}
+
+fn joinCommaSeparatedSlices(input: []const []const u8, outputBuffer: []u8) ![]const u8 {
+    var cursor: usize = 0;
+    for (input) |item| {
+        if (cursor != 0) {
+            if (cursor >= outputBuffer.len) return error.StreamTooLong;
+            outputBuffer[cursor] = ',';
+            cursor += 1;
+        }
+        if (cursor + item.len > outputBuffer.len) return error.StreamTooLong;
+        @memcpy(outputBuffer[cursor .. cursor + item.len], item);
+        cursor += item.len;
+    }
+    return outputBuffer[0..cursor];
+}
+
+fn pickMultiple(
+    options: []const []const u8,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    selectionBuffer: []([]const u8),
+) ![]const []const u8 {
+    if (options.len > selectionBuffer.len) return error.StreamTooLong;
+
+    const maxOptions = 512;
+    if (options.len > maxOptions) return error.StreamTooLong;
+
+    const RawTerminalMode = struct {
+        fd: std.posix.fd_t,
+        previous: std.posix.termios,
+
+        fn enter(fd: std.posix.fd_t) !@This() {
+            const previous = try std.posix.tcgetattr(fd);
+            var current = previous;
+
+            current.iflag.ICRNL = false;
+            current.iflag.IXON = false;
+            current.lflag.ICANON = false;
+            current.lflag.ECHO = false;
+            current.lflag.IEXTEN = false;
+
+            try std.posix.tcsetattr(fd, .FLUSH, current);
+            return .{
+                .fd = fd,
+                .previous = previous,
+            };
+        }
+
+        fn restore(self: *const @This()) void {
+            std.posix.tcsetattr(self.fd, .FLUSH, self.previous) catch {};
+        }
+    };
+
+    var liveSelection = !builtin.is_test and
+        std.posix.isatty(std.posix.STDIN_FILENO) and
+        std.posix.isatty(std.posix.STDOUT_FILENO);
+    var rawMode: ?RawTerminalMode = null;
+
+    if (liveSelection) {
+        rawMode = RawTerminalMode.enter(std.posix.STDIN_FILENO) catch |err| switch (err) {
+            error.NotATerminal => null,
+            else => return err,
+        };
+        if (rawMode == null) liveSelection = false;
+    }
+    defer if (rawMode) |raw| {
+        raw.restore();
+    };
+
+    const renderPicker = struct {
+        fn call(
+            w: *std.Io.Writer,
+            items: []const []const u8,
+            selected: []const bool,
+            cursor: usize,
+            selectedCount: usize,
+            rerender: bool,
+        ) !void {
+            const lines = items.len + 2;
+            if (rerender and lines > 0) {
+                try w.print("\x1b[{d}A\r", .{lines});
+            }
+            try w.writeAll("\x1b[J");
+            try w.writeAll("Reviewers (up/down to move, space to toggle, enter to confirm)\n");
+            for (items, 0..) |item, idx| {
+                const indicator = if (idx == cursor) ">" else " ";
+                const marker = if (selected[idx]) "x" else " ";
+                try w.print("{s} [{s}] {s}\x1b[K\n", .{ indicator, marker, item });
+            }
+            try w.print("Selected: {d}\x1b[K\n", .{selectedCount});
+            try w.flush();
+        }
+    }.call;
+
+    var selectedFlags = std.mem.zeroes([maxOptions]bool);
+    var selectedCount: usize = 0;
+    var cursor: usize = 0;
+    var rendered = false;
+
+    if (liveSelection) {
+        try renderPicker(writer, options, selectedFlags[0..options.len], cursor, selectedCount, false);
+        rendered = true;
+    }
+
+    while (true) {
+        const byte = reader.takeByte() catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        var changed = false;
+        var submitted = false;
+
+        switch (byte) {
+            '\n' => submitted = true,
+            '\r' => {
+                if (reader.bufferedLen() > 0 and reader.buffered()[0] == '\n') {
+                    reader.toss(1);
+                }
+                submitted = true;
+            },
+            ' ' => {
+                if (options.len != 0) {
+                    selectedFlags[cursor] = !selectedFlags[cursor];
+                    if (selectedFlags[cursor]) {
+                        selectedCount += 1;
+                    } else {
+                        selectedCount -= 1;
+                    }
+                    changed = true;
+                }
+            },
+            'k' => {
+                if (cursor > 0) {
+                    cursor -= 1;
+                    changed = true;
+                }
+            },
+            'j' => {
+                if (cursor + 1 < options.len) {
+                    cursor += 1;
+                    changed = true;
+                }
+            },
+            0x1b => {
+                const action = try readPromptEscapeAction(reader);
+                switch (action) {
+                    .submit => submitted = true,
+                    .move_up => {
+                        if (cursor > 0) {
+                            cursor -= 1;
+                            changed = true;
+                        }
+                    },
+                    .move_down => {
+                        if (cursor + 1 < options.len) {
+                            cursor += 1;
+                            changed = true;
+                        }
+                    },
+                    .move_home => {
+                        if (options.len != 0 and cursor != 0) {
+                            cursor = 0;
+                            changed = true;
+                        }
+                    },
+                    .move_end => {
+                        if (options.len != 0 and cursor != options.len - 1) {
+                            cursor = options.len - 1;
+                            changed = true;
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+
+        if (submitted) break;
+        if (liveSelection and changed) {
+            try renderPicker(writer, options, selectedFlags[0..options.len], cursor, selectedCount, rendered);
+            rendered = true;
+        }
+    }
+
+    var selectionLen: usize = 0;
+    for (options, 0..) |item, idx| {
+        if (!selectedFlags[idx]) continue;
+        selectionBuffer[selectionLen] = item;
+        selectionLen += 1;
+    }
+    return selectionBuffer[0..selectionLen];
 }
 
 const Config = struct {
@@ -950,14 +1171,14 @@ const Shell = struct {
 fn generateSlackMessage(
     title: []const u8,
     url: []const u8,
-    reviewers: *std.mem.SplitIterator(u8, .any),
+    reviewers: []const []const u8,
     config: *const Config,
     buffer: []u8,
 ) ![]u8 {
     var reviewerMentionBuffer: [1024]u8 = undefined;
     var reviewerMentions = std.ArrayList(u8).initBuffer(&reviewerMentionBuffer);
     var wroteReviewer = false;
-    while (reviewers.next()) |githubHandleRaw| {
+    for (reviewers) |githubHandleRaw| {
         const githubHandle = std.mem.trim(u8, githubHandleRaw, &std.ascii.whitespace);
         if (githubHandle.len == 0) continue;
 
@@ -1146,8 +1367,9 @@ pub fn main() !void {
         "gh api 'repos/{s}/collaborators' --paginate --jq '.[] | select(.login != \"{s}\") | .login'",
         .{ repo, currentUser },
     );
+    var collaboratorsListBuffer: [32 * 1024]u8 = undefined;
     const collaboratorsList = if (collaboratorsResult.exitCode == 0)
-        std.mem.trim(u8, collaboratorsResult.output, &std.ascii.whitespace)
+        try copyTrimmed(collaboratorsResult.output, &collaboratorsListBuffer)
     else
         "";
 
@@ -1158,38 +1380,35 @@ pub fn main() !void {
         try writer.flush();
     }
 
-    if (collaboratorsList.len != 0) {
-        try writer.print("Available user reviewers:\n{s}\n", .{collaboratorsList});
-        try writer.flush();
-    }
-
     const teamsResult = try shell.runCommand(
         &outputBuffer,
         "gh api 'repos/{s}/teams' --paginate --jq '.[] | .organization.login + \"/\" + .slug'",
         .{repo},
     );
+    var teamsListBuffer: [32 * 1024]u8 = undefined;
     const teamsList = if (teamsResult.exitCode == 0)
-        std.mem.trim(u8, teamsResult.output, &std.ascii.whitespace)
+        try copyTrimmed(teamsResult.output, &teamsListBuffer)
     else
         "";
-    if (teamsList.len != 0) {
-        try writer.print("Available team reviewers:\n{s}\n", .{teamsList});
-        try writer.flush();
-    }
 
-    var reviewersBuffer: [2048]u8 = undefined;
-    var reviewers: []const u8 = &.{};
-    if (collaboratorsList.len != 0 or teamsList.len != 0) {
-        var reviewerInputBuffer: [2048]u8 = undefined;
-        const reviewersInput = try promptText("Reviewers (comma-separated, optional): ", reader, writer, &reviewerInputBuffer);
-        reviewers = try normalizeCommaSeparated(reviewersInput, &reviewersBuffer);
-    }
+    var reviewerChoicesBuffer: [512][]const u8 = undefined;
+    var reviewerChoicesLen: usize = 0;
+    try collectUniqueLines(collaboratorsList, &reviewerChoicesBuffer, &reviewerChoicesLen);
+    try collectUniqueLines(teamsList, &reviewerChoicesBuffer, &reviewerChoicesLen);
+    const reviewerChoices = reviewerChoicesBuffer[0..reviewerChoicesLen];
+
+    var selectedReviewersBuffer: [512][]const u8 = undefined;
+    const selectedReviewers = try pickMultiple(reviewerChoices, reader, writer, &selectedReviewersBuffer);
+
+    var reviewersCsvBuffer: [2048]u8 = undefined;
+    const reviewersCsv = try joinCommaSeparatedSlices(selectedReviewers, &reviewersCsvBuffer);
+
     const draftArg = if (cliOptions.draft) " --draft" else "";
 
     const createPrResult = try shell.runCommand(
         &outputBuffer,
         "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'{s}",
-        .{ base, headBranch, title, bodyFilePath, reviewers, draftArg },
+        .{ base, headBranch, title, bodyFilePath, reviewersCsv, draftArg },
     );
     if (createPrResult.exitCode != 0) return error.PullRequestCreateFailed;
 
@@ -1197,12 +1416,11 @@ pub fn main() !void {
     const createPrUrl = try copyTrimmed(createPrResult.output, &createPrUrlBuffer);
     std.debug.assert(createPrUrl.len != 0);
     std.log.debug("create pr output {s}", .{createPrUrl});
-    var reviewersIterator = std.mem.splitAny(u8, reviewers, ",");
     var messageBuffer: [32 * 1024]u8 = undefined;
     const message = try generateSlackMessage(
         title,
         createPrUrl,
-        &reviewersIterator,
+        selectedReviewers,
         &config,
         &messageBuffer,
     );
@@ -1459,6 +1677,40 @@ test "normalizeCommaSeparated trims values and drops empties" {
     try std.testing.expectEqualStrings("alice,bob,org/team", normalized);
 }
 
+test "collectUniqueLines merges newline lists without duplicates" {
+    var out: [8][]const u8 = undefined;
+    var outLen: usize = 0;
+
+    try collectUniqueLines("alice\nbob\n", &out, &outLen);
+    try collectUniqueLines("org/team\nbob\n", &out, &outLen);
+    const values = out[0..outLen];
+
+    try std.testing.expectEqual(@as(usize, 3), values.len);
+    try std.testing.expectEqualStrings("alice", values[0]);
+    try std.testing.expectEqualStrings("bob", values[1]);
+    try std.testing.expectEqualStrings("org/team", values[2]);
+}
+
+test "joinCommaSeparatedSlices joins selected values" {
+    const input = [_][]const u8{ "alice", "org/team", "bob" };
+    var out: [64]u8 = undefined;
+    const joined = try joinCommaSeparatedSlices(input[0..], &out);
+    try std.testing.expectEqualStrings("alice,org/team,bob", joined);
+}
+
+test "pickMultiple selects options with arrow keys and space" {
+    const options = [_][]const u8{ "alice", "bob", "org/team" };
+    var reader = std.Io.Reader.fixed("\x1b[B \x1b[B \n");
+    var outputBuffer: [8]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
+    var selectedBuffer: [3][]const u8 = undefined;
+
+    const selected = try pickMultiple(options[0..], &reader, &writer, &selectedBuffer);
+    try std.testing.expectEqual(@as(usize, 2), selected.len);
+    try std.testing.expectEqualStrings("bob", selected[0]);
+    try std.testing.expectEqualStrings("org/team", selected[1]);
+}
+
 test "Config init creates file and defaults github handles to themselves" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1531,12 +1783,12 @@ test "generateSlackMessage uses slack map and falls back to github handle" {
     defer config.deinit();
     try config.putMapping("alice", "alice.slack");
 
-    var reviewers = std.mem.splitAny(u8, "alice,bob", ",");
+    const reviewers = [_][]const u8{ "alice", "bob" };
     var msgBuffer: [512]u8 = undefined;
     const message = try generateSlackMessage(
         "Fix race condition",
         "https://github.com/acme/repo/pull/123",
-        &reviewers,
+        reviewers[0..],
         &config,
         &msgBuffer,
     );
