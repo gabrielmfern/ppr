@@ -553,8 +553,16 @@ fn generateSlackMessage(
 ) ![]u8 {
     var reviewerMentionBuffer: [1024]u8 = undefined;
     var reviewerMentions = std.ArrayList(u8).initBuffer(&reviewerMentionBuffer);
-    var index = 0;
-    while (reviewers.next()) |githubHandle| {
+    var wroteReviewer = false;
+    while (reviewers.next()) |githubHandleRaw| {
+        const githubHandle = std.mem.trim(u8, githubHandleRaw, &std.ascii.whitespace);
+        if (githubHandle.len == 0) continue;
+
+        if (wroteReviewer) {
+            reviewerMentions.appendSliceAssumeCapacity(" / ");
+        }
+        wroteReviewer = true;
+
         if (config.getSlackHandle(githubHandle)) |slackHandle| {
             reviewerMentions.appendSliceAssumeCapacity("@");
             reviewerMentions.appendSliceAssumeCapacity(slackHandle);
@@ -562,10 +570,6 @@ fn generateSlackMessage(
             reviewerMentions.appendSliceAssumeCapacity("@");
             reviewerMentions.appendSliceAssumeCapacity(githubHandle);
         }
-        if (index < reviewers.len - 1) {
-            reviewerMentions.appendSliceAssumeCapacity(" / ");
-        }
-        index += 1;
     }
     return try std.fmt.bufPrint(
         buffer,
@@ -784,10 +788,11 @@ pub fn main() !void {
     const createPrOutput = std.mem.trim(u8, createPrResult.output, &std.ascii.whitespace);
     std.debug.assert(createPrOutput.len != 0);
     std.log.debug("create pr output {s}", .{createPrOutput});
+    var reviewersIterator = std.mem.splitAny(u8, reviewers, ",");
     const message = try generateSlackMessage(
         title,
         createPrOutput,
-        std.mem.splitAny(u8, reviewers, ","),
+        &reviewersIterator,
         &config,
         &outputBuffer,
     );
@@ -994,12 +999,12 @@ test "generateSlackMessage uses slack map and falls back to github handle" {
     defer config.deinit();
     try config.putMapping("alice", "alice.slack");
 
-    var reviewers = [_][]const u8{ "alice", "bob" };
+    var reviewers = std.mem.splitAny(u8, "alice,bob", ",");
     var msgBuffer: [512]u8 = undefined;
     const message = try generateSlackMessage(
         "Fix race condition",
         "https://github.com/acme/repo/pull/123",
-        reviewers[0..],
+        &reviewers,
         &config,
         &msgBuffer,
     );
