@@ -25,15 +25,21 @@ fn promptText(
     return collecting.buffered();
 }
 
-fn promptYesNo(
+fn promptConfirmation(
     prompt: []const u8,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
-) !bool {
+) !?bool {
     var input_buffer: [16]u8 = undefined;
     const text = try promptText(prompt, reader, writer, &input_buffer);
     const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
-    return std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes");
+    if (std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes")) {
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "n") or std.ascii.eqlIgnoreCase(trimmed, "no")) {
+        return false;
+    }
+    return null;
 }
 
 fn worktreeIsClean(status_sb_output: []const u8) bool {
@@ -297,14 +303,18 @@ pub fn main() !void {
         return error.SafetyCheckFailed;
     }
 
-    const worktreeStatusResult = try shell.runCommand("git status -s", &outputBuffer);
-    if (!worktreeIsClean(worktreeStatusResult.output)) return error.WorktreeNotClean;
+    const worktreeStatusResult = try shell.runCommand("git status -sb", &outputBuffer);
+    if (!worktreeIsClean(worktreeStatusResult.output)) {
+        if (try promptConfirmation("You have something to commit. Do it anyway? (Y/n)", reader, writer) orelse true == false) {
+            return;
+        }
+    }
 
     var existingPrCommandBuffer: [512]u8 = undefined;
     const existingPrCommand = try std.fmt.bufPrint(
         &existingPrCommandBuffer,
         "gh pr list --head '{s}' --base '{s}' --state open --json url --jq '.[0].url // \"\"'",
-        .{ ghAuthStatus, base },
+        .{ headBranch, base },
     );
     const existingPrResult = try shell.runCommand(existingPrCommand, &outputBuffer);
     const existingPrUrl = std.mem.trim(u8, existingPrResult.output, " ");
@@ -333,10 +343,9 @@ pub fn main() !void {
         return;
     }
 
-    const willWriteBody = try promptYesNo("Write the body (y/N): ", reader, writer);
     var bodyBuffer: [1_048_576]u8 = undefined;
     var body: []u8 = &.{};
-    if (willWriteBody) {
+    if (try promptConfirmation("Write the body (y/N): ", reader, writer) orelse false) {
         body = try promptEditor(&bodyBuffer);
     }
 }
@@ -415,33 +424,33 @@ test "promptEditor returns EditorFailed on non-zero exit" {
     );
 }
 
-test "promptYesNo accepts yes" {
+test "promptConfirmation accepts yes" {
     var reader = std.Io.Reader.fixed("YeS\n");
     var output_storage: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_storage);
 
-    const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
-    try std.testing.expect(accepted);
+    const accepted = try promptConfirmation("Continue? (y/N): ", &reader, &writer);
+    try std.testing.expect(accepted == true);
     try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
 }
 
-test "promptYesNo defaults to no on empty input" {
+test "promptConfirmation null on empty input" {
     var reader = std.Io.Reader.fixed("\n");
     var output_storage: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_storage);
 
-    const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
-    try std.testing.expect(!accepted);
+    const accepted = try promptConfirmation("Continue? (y/N): ", &reader, &writer);
+    try std.testing.expect(accepted == null);
     try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
 }
 
-test "promptYesNo returns false for invalid answer" {
+test "promptConfirmation returns null for invalid answer" {
     var reader = std.Io.Reader.fixed("maybe\n");
     var output_storage: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_storage);
 
-    const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
-    try std.testing.expect(!accepted);
+    const accepted = try promptConfirmation("Continue? (y/N): ", &reader, &writer);
+    try std.testing.expect(accepted == null);
     try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
 }
 
