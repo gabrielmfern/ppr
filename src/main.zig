@@ -278,6 +278,7 @@ pub fn main() !void {
         try writer.flush();
         return error.SafetyCheckFailed;
     }
+    std.log.debug("auth status {s}", .{ghAuthStatus.output});
 
     const baseBranchResult = try shell.runCommand(
         "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
@@ -289,6 +290,7 @@ pub fn main() !void {
         try writer.flush();
         return error.SafetyCheckFailed;
     }
+    std.log.debug("base {s}", .{base});
 
     const headBranchNameResult = try shell.runCommand("git rev-parse --abbrev-ref HEAD", &outputBuffer);
     if (headBranchNameResult.exitCode != 0) {
@@ -297,8 +299,15 @@ pub fn main() !void {
         return error.SafetyCheckFailed;
     }
     const headBranch = std.mem.trim(u8, headBranchNameResult.output, " ");
+    std.log.debug("head branch {s}", .{headBranch});
     if (headBranch.len == 0 or std.mem.eql(u8, headBranch, "HEAD")) {
         try writer.print("HEAD is deatched, which means you're not checked out to a branch\n", .{});
+        try writer.flush();
+        return error.SafetyCheckFailed;
+    }
+
+    if (std.mem.eql(u8, headBranch, base)) {
+        try writer.print("Current branch is the same as the default branch. That can't become a pull request.\n", .{});
         try writer.flush();
         return error.SafetyCheckFailed;
     }
@@ -317,9 +326,9 @@ pub fn main() !void {
         .{ headBranch, base },
     );
     const existingPrResult = try shell.runCommand(existingPrCommand, &outputBuffer);
-    const existingPrUrl = std.mem.trim(u8, existingPrResult.output, " ");
-    if (existingPrUrl.len != 0) {
-        try writer.print("An open PR already exists: {s}\n", .{existingPrUrl});
+    if (std.mem.trim(u8, existingPrResult.output, "\n").len != 0) {
+        std.log.debug("{s}", .{existingPrResult.output});
+        try writer.print("An open PR already exists: {s}\n", .{existingPrResult.output});
         try writer.flush();
         return error.SafetyCheckFailed;
     }
@@ -331,6 +340,7 @@ pub fn main() !void {
         .{base},
     );
     const commitRangeResult = try shell.runCommand(commitRangeCommand, &outputBuffer);
+    std.log.debug("commit range {s}", .{commitRangeResult.output});
     if (std.mem.trim(u8, commitRangeResult.output, " ").len == 0) {
         return error.SafetyCheckFailed;
     }
