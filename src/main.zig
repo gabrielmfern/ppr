@@ -71,6 +71,151 @@ fn normalizeCommaSeparated(input: []const u8, output_buffer: []u8) ![]u8 {
     return output_buffer[0..cursor];
 }
 
+const Config = struct {
+    allocator: std.mem.Allocator,
+    name: []u8,
+    path: []u8,
+    reviewer_github_to_slack: std.StringArrayHashMap([]u8),
+    created: bool,
+
+    const max_file_size = 1024 * 1024;
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        github_reviewers: []const u8,
+    ) !Config {
+        const home = try std.process.getEnvVarOwned(allocator, "HOME");
+        defer allocator.free(home);
+        return initWithHome(allocator, name, home, github_reviewers);
+    }
+
+    fn initWithHome(
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        home: []const u8,
+        github_reviewers: []const u8,
+    ) !Config {
+        const config_dir = try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
+        defer allocator.free(config_dir);
+
+        std.fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ config_dir, name });
+        errdefer allocator.free(path);
+
+        var config = Config{
+            .allocator = allocator,
+            .name = try allocator.dupe(u8, name),
+            .path = path,
+            .reviewer_github_to_slack = std.StringArrayHashMap([]u8).init(allocator),
+            .created = false,
+        };
+        errdefer config.deinit();
+
+        const exists = blk: {
+            std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :blk false,
+                else => return err,
+            };
+            break :blk true;
+        };
+
+        if (exists) {
+            try config.load();
+        } else {
+            config.created = true;
+            try config.seedDefaults(github_reviewers);
+            try config.save();
+        }
+
+        return config;
+    }
+
+    pub fn deinit(self: *Config) void {
+        var it = self.reviewer_github_to_slack.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.reviewer_github_to_slack.deinit();
+        self.allocator.free(self.name);
+        self.allocator.free(self.path);
+        self.* = undefined;
+    }
+
+    fn putMapping(self: *Config, github_handle: []const u8, slack_handle: []const u8) !void {
+        if (self.reviewer_github_to_slack.get(github_handle) != null) return;
+
+        const github_copy = try self.allocator.dupe(u8, github_handle);
+        errdefer self.allocator.free(github_copy);
+        const slack_copy = try self.allocator.dupe(u8, slack_handle);
+        errdefer self.allocator.free(slack_copy);
+        try self.reviewer_github_to_slack.put(github_copy, slack_copy);
+    }
+
+    fn seedDefaults(self: *Config, github_reviewers: []const u8) !void {
+        var lines = std.mem.splitScalar(u8, github_reviewers, '\n');
+        while (lines.next()) |line_raw| {
+            const handle = std.mem.trim(u8, line_raw, &std.ascii.whitespace);
+            if (handle.len == 0) continue;
+            try self.putMapping(handle, handle);
+        }
+    }
+
+    fn load(self: *Config) !void {
+        var file = try std.fs.openFileAbsolute(self.path, .{});
+        defer file.close();
+
+        const json_text = try file.readToEndAlloc(self.allocator, max_file_size);
+        defer self.allocator.free(json_text);
+        const trimmed = std.mem.trim(u8, json_text, &std.ascii.whitespace);
+        if (trimmed.len == 0) return;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, json_text, .{}) catch {
+            return error.InvalidConfig;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return error.InvalidConfig;
+        var it = parsed.value.object.iterator();
+        while (it.next()) |entry| {
+            const slack_handle = switch (entry.value_ptr.*) {
+                .string => |text| text,
+                else => return error.InvalidConfig,
+            };
+            try self.putMapping(entry.key_ptr.*, slack_handle);
+        }
+    }
+
+    fn save(self: *const Config) !void {
+        var file = try std.fs.createFileAbsolute(self.path, .{
+            .truncate = true,
+        });
+        defer file.close();
+
+        var write_buffer: [4096]u8 = undefined;
+        var file_writer = file.writer(&write_buffer);
+        var json_writer: std.json.Stringify = .{
+            .writer = &file_writer.interface,
+            .options = .{ .whitespace = .indent_2 },
+        };
+
+        try json_writer.beginObject();
+        var it = self.reviewer_github_to_slack.iterator();
+        while (it.next()) |entry| {
+            try json_writer.objectField(entry.key_ptr.*);
+            try json_writer.write(entry.value_ptr.*);
+        }
+        try json_writer.endObject();
+        try file_writer.interface.writeAll("\n");
+        try file_writer.interface.flush();
+    }
+};
+
 fn worktreeIsClean(status_sb_output: []const u8) bool {
     var lines = std.mem.tokenizeScalar(u8, status_sb_output, '\n');
     _ = lines.next() orelse return false;
@@ -433,6 +578,14 @@ pub fn main() !void {
         std.mem.trim(u8, collaboratorsResult.output, &std.ascii.whitespace)
     else
         "";
+
+    var config = try Config.init(allocator, "ppr", collaboratorsList);
+    defer config.deinit();
+    if (config.created) {
+        try writer.print("Created config file: {s}\n", .{config.path});
+        try writer.flush();
+    }
+
     if (collaboratorsList.len != 0) {
         try writer.print("Available user reviewers:\n{s}\n", .{collaboratorsList});
         try writer.flush();
@@ -597,4 +750,66 @@ test "normalizeCommaSeparated trims values and drops empties" {
     var out: [64]u8 = undefined;
     const normalized = try normalizeCommaSeparated(" alice, bob ,,org/team ", &out);
     try std.testing.expectEqualStrings("alice,bob,org/team", normalized);
+}
+
+test "Config init creates file and defaults github handles to themselves" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    var config = try Config.initWithHome(std.testing.allocator, "ppr-test", home, "alice\nbob\n");
+    defer config.deinit();
+
+    try std.testing.expect(config.created);
+    try std.testing.expectEqualStrings("alice", config.reviewer_github_to_slack.get("alice").?);
+    try std.testing.expectEqualStrings("bob", config.reviewer_github_to_slack.get("bob").?);
+
+    const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/.config/ppr-test.json", .{home});
+    defer std.testing.allocator.free(config_path);
+
+    var file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+
+    const json_text = try file.readToEndAlloc(std.testing.allocator, 4096);
+    defer std.testing.allocator.free(json_text);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_text, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value == .object);
+    try std.testing.expectEqualStrings("alice", parsed.value.object.get("alice").?.string);
+    try std.testing.expectEqualStrings("bob", parsed.value.object.get("bob").?.string);
+}
+
+test "Config init loads existing reviewer to slack map" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    const config_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}/.config", .{home});
+    defer std.testing.allocator.free(config_dir);
+    try std.fs.makeDirAbsolute(config_dir);
+
+    const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/ppr-test.json", .{config_dir});
+    defer std.testing.allocator.free(config_path);
+
+    var file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(
+        \\{
+        \\  "alice": "@alice-in-slack"
+        \\}
+        \\
+    );
+
+    var config = try Config.initWithHome(std.testing.allocator, "ppr-test", home, "alice\nbob\n");
+    defer config.deinit();
+
+    try std.testing.expect(!config.created);
+    try std.testing.expectEqualStrings("@alice-in-slack", config.reviewer_github_to_slack.get("alice").?);
+    try std.testing.expect(config.reviewer_github_to_slack.get("bob") == null);
 }
