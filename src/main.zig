@@ -36,6 +36,59 @@ fn promptYesNo(
     return std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes");
 }
 
+fn promptEditor(text_buffer: []u8) ![]u8 {
+    return promptEditorWithScript("${EDITOR:-vi} \"$1\"", text_buffer);
+}
+
+fn promptEditorWithScript(script: []const u8, text_buffer: []u8) ![]u8 {
+    if (builtin.os.tag == .windows) return error.UnsupportedOperatingSystem;
+
+    var path_storage: [128]u8 = undefined;
+    const temp_path = try createTempEditorFile(&path_storage);
+    defer std.fs.deleteFileAbsolute(temp_path) catch {};
+
+    var child = std.process.Child.init(
+        &.{ "/bin/sh", "-c", script, "ppr-editor", temp_path },
+        std.heap.page_allocator,
+    );
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.EditorFailed,
+        else => return error.EditorFailed,
+    }
+
+    var file = try std.fs.openFileAbsolute(temp_path, .{});
+    defer file.close();
+
+    const n = try file.readAll(text_buffer);
+    var extra: [1]u8 = undefined;
+    if (try file.read(&extra) != 0) return error.StreamTooLong;
+    return text_buffer[0..n];
+}
+
+fn createTempEditorFile(path_storage: []u8) ![]u8 {
+    for (0..32) |_| {
+        const random_suffix = std.crypto.random.int(u64);
+        const temp_path = try std.fmt.bufPrint(path_storage, "/tmp/ppr-editor-{x}.md", .{random_suffix});
+
+        const file = std.fs.createFileAbsolute(temp_path, .{
+            .read = true,
+            .exclusive = true,
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        file.close();
+        return temp_path;
+    }
+    return error.UnableToCreateTempFile;
+}
+
 const GitHub = struct {
     child: std.process.Child,
     stdout_buffer: [stdout_buffer_size]u8,
@@ -195,13 +248,18 @@ pub fn main() !void {
     const reader = &stdin.interface;
     const writer = &stdout.interface;
 
-    var title_buffer: [512]u8 = undefined;
-    const title = try promptText("Title: ", reader, writer, &title_buffer);
-    std.log.info("title: {s}", .{title});
+    var titleBuffer: [512]u8 = undefined;
+    const title = try promptText("Title: ", reader, writer, &titleBuffer);
+    if (std.mem.trim(u8, title, " ").len == 0) {
+        std.log.info("Title is empty, exiting");
+        return;
+    }
 
-    const willWriteBody = try promptYesNo("Want to write the body (y/N): ", reader, writer);
+    const willWriteBody = try promptYesNo("Write the body (y/N): ", reader, writer);
+    var bodyBuffer: [1_048_576]u8 = undefined;
+    var body: []u8 = &.{};
     if (willWriteBody) {
-        std.log.info("body:", .{});
+        body = try promptEditor(&bodyBuffer);
     }
 }
 
@@ -254,6 +312,28 @@ test "promptText returns StreamTooLong when input exceeds fixed buffer" {
     try std.testing.expectError(
         error.StreamTooLong,
         promptText("Title: ", &reader, &writer, &input_storage),
+    );
+}
+
+test "promptEditor reads text written by editor" {
+    var text_buffer: [64]u8 = undefined;
+    const text = try promptEditorWithScript("printf 'body from editor' > \"$1\"", &text_buffer);
+    try std.testing.expectEqualStrings("body from editor", text);
+}
+
+test "promptEditor returns StreamTooLong for oversized text" {
+    var text_buffer: [4]u8 = undefined;
+    try std.testing.expectError(
+        error.StreamTooLong,
+        promptEditorWithScript("printf 'abcdef' > \"$1\"", &text_buffer),
+    );
+}
+
+test "promptEditor returns EditorFailed on non-zero exit" {
+    var text_buffer: [32]u8 = undefined;
+    try std.testing.expectError(
+        error.EditorFailed,
+        promptEditorWithScript("exit 2", &text_buffer),
     );
 }
 
