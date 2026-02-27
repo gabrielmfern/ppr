@@ -49,6 +49,82 @@ fn copyTrimmed(input: []const u8, output_buffer: []u8) ![]u8 {
     return output_buffer[0..trimmed.len];
 }
 
+fn normalizeCommaSeparated(input: []const u8, output_buffer: []u8) ![]u8 {
+    var cursor: usize = 0;
+    var parts = std.mem.splitScalar(u8, input, ',');
+
+    while (parts.next()) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, &std.ascii.whitespace);
+        if (part.len == 0) continue;
+
+        if (cursor != 0) {
+            if (cursor >= output_buffer.len) return error.StreamTooLong;
+            output_buffer[cursor] = ',';
+            cursor += 1;
+        }
+
+        if (cursor + part.len > output_buffer.len) return error.StreamTooLong;
+        @memcpy(output_buffer[cursor .. cursor + part.len], part);
+        cursor += part.len;
+    }
+
+    return output_buffer[0..cursor];
+}
+
+fn createPullRequest(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    head_branch: []const u8,
+    title: []const u8,
+    body_file_path: []const u8,
+    reviewers: []const u8,
+) !void {
+    var argv: [16][]const u8 = undefined;
+    var argc: usize = 0;
+
+    argv[argc] = "gh";
+    argc += 1;
+    argv[argc] = "pr";
+    argc += 1;
+    argv[argc] = "create";
+    argc += 1;
+    argv[argc] = "--base";
+    argc += 1;
+    argv[argc] = base;
+    argc += 1;
+    argv[argc] = "--head";
+    argc += 1;
+    argv[argc] = head_branch;
+    argc += 1;
+    argv[argc] = "--title";
+    argc += 1;
+    argv[argc] = title;
+    argc += 1;
+    argv[argc] = "--body-file";
+    argc += 1;
+    argv[argc] = body_file_path;
+    argc += 1;
+
+    if (reviewers.len != 0) {
+        argv[argc] = "--reviewer";
+        argc += 1;
+        argv[argc] = reviewers;
+        argc += 1;
+    }
+
+    var child = std.process.Child.init(argv[0..argc], allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.PullRequestCreateFailed,
+        else => return error.PullRequestCreateFailed,
+    }
+}
+
 fn worktreeIsClean(status_sb_output: []const u8) bool {
     var lines = std.mem.tokenizeScalar(u8, status_sb_output, '\n');
     _ = lines.next() orelse return false;
@@ -386,6 +462,52 @@ pub fn main() !void {
     if (try promptConfirmation("Write the body (y/N): ", reader, writer) orelse false) {
         body = try promptEditor(&bodyBuffer);
     }
+
+    const repoResult = try shell.runCommand(
+        "gh repo view --json nameWithOwner -q .nameWithOwner",
+        &outputBuffer,
+    );
+    if (repoResult.exitCode != 0) return error.SafetyCheckFailed;
+    var repoBuffer: [256]u8 = undefined;
+    const repo = try copyTrimmed(repoResult.output, &repoBuffer);
+
+    var collaboratorsCommandBuffer: [512]u8 = undefined;
+    const collaboratorsCommand = try std.fmt.bufPrint(
+        &collaboratorsCommandBuffer,
+        "gh api 'repos/{s}/collaborators' --paginate --jq '.[].login'",
+        .{repo},
+    );
+    const collaboratorsResult = try shell.runCommand(collaboratorsCommand, &outputBuffer);
+    if (collaboratorsResult.exitCode == 0 and std.mem.trim(u8, collaboratorsResult.output, &std.ascii.whitespace).len != 0) {
+        try writer.print("Available user reviewers:\n{s}\n", .{std.mem.trimRight(u8, collaboratorsResult.output, &std.ascii.whitespace)});
+        try writer.flush();
+    }
+
+    var teamsCommandBuffer: [512]u8 = undefined;
+    const teamsCommand = try std.fmt.bufPrint(
+        &teamsCommandBuffer,
+        "gh api 'repos/{s}/teams' --paginate --jq '.[] | .organization.login + \"/\" + .slug'",
+        .{repo},
+    );
+    const teamsResult = try shell.runCommand(teamsCommand, &outputBuffer);
+    if (teamsResult.exitCode == 0 and std.mem.trim(u8, teamsResult.output, &std.ascii.whitespace).len != 0) {
+        try writer.print("Available team reviewers:\n{s}\n", .{std.mem.trimRight(u8, teamsResult.output, &std.ascii.whitespace)});
+        try writer.flush();
+    }
+
+    var reviewerInputBuffer: [2048]u8 = undefined;
+    const reviewersInput = try promptText("Reviewers (comma-separated, optional): ", reader, writer, &reviewerInputBuffer);
+    var reviewersBuffer: [2048]u8 = undefined;
+    const reviewers = try normalizeCommaSeparated(reviewersInput, &reviewersBuffer);
+
+    var bodyFilePathBuffer: [128]u8 = undefined;
+    const bodyFilePath = try createTempEditorFile(&bodyFilePathBuffer);
+    defer std.fs.deleteFileAbsolute(bodyFilePath) catch {};
+    var bodyFile = try std.fs.createFileAbsolute(bodyFilePath, .{});
+    defer bodyFile.close();
+    try bodyFile.writeAll(body);
+
+    try createPullRequest(allocator, base, headBranch, title, bodyFilePath, reviewers);
 }
 
 test "Shell keeps child shell alive between commands" {
@@ -498,4 +620,10 @@ test "worktreeIsClean returns true when status has only branch line" {
 
 test "worktreeIsClean returns false when status has file changes" {
     try std.testing.expect(!worktreeIsClean("## main...origin/main\n M src/main.zig\n"));
+}
+
+test "normalizeCommaSeparated trims values and drops empties" {
+    var out: [64]u8 = undefined;
+    const normalized = try normalizeCommaSeparated(" alice, bob ,,org/team ", &out);
+    try std.testing.expectEqualStrings("alice,bob,org/team", normalized);
 }
