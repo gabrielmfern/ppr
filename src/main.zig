@@ -785,19 +785,21 @@ pub fn main() !void {
     );
     if (createPrResult.exitCode != 0) return error.PullRequestCreateFailed;
 
-    const createPrOutput = std.mem.trim(u8, createPrResult.output, &std.ascii.whitespace);
-    std.debug.assert(createPrOutput.len != 0);
-    std.log.debug("create pr output {s}", .{createPrOutput});
+    var createPrUrlBuffer: [4096]u8 = undefined;
+    const createPrUrl = try copyTrimmed(createPrResult.output, &createPrUrlBuffer);
+    std.debug.assert(createPrUrl.len != 0);
+    std.log.debug("create pr output {s}", .{createPrUrl});
     var reviewersIterator = std.mem.splitAny(u8, reviewers, ",");
+    var messageBuffer: [32 * 1024]u8 = undefined;
     const message = try generateSlackMessage(
         title,
-        createPrOutput,
+        createPrUrl,
         &reviewersIterator,
         &config,
-        &outputBuffer,
+        &messageBuffer,
     );
     try copyToClipboard(&shell, message);
-    try writer.print("Pull request created: {s}\nThe PR URL and title have been copied to your clipboard in a Slack message format.\n", .{createPrOutput});
+    try writer.print("Pull request created: {s}\nThe PR URL and title have been copied to your clipboard in a Slack message format.\n", .{createPrUrl});
     try writer.print("{s}\n", .{message});
     try writer.flush();
 }
