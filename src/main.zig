@@ -547,13 +547,14 @@ const Shell = struct {
 fn generateSlackMessage(
     title: []const u8,
     url: []const u8,
-    reviewers: [][]const u8,
+    reviewers: *std.mem.SplitIterator(u8, .any),
     config: *const Config,
     buffer: []u8,
 ) ![]u8 {
     var reviewerMentionBuffer: [1024]u8 = undefined;
     var reviewerMentions = std.ArrayList(u8).initBuffer(&reviewerMentionBuffer);
-    for (reviewers, 0..) |githubHandle, i| {
+    var index = 0;
+    while (reviewers.next()) |githubHandle| {
         if (config.getSlackHandle(githubHandle)) |slackHandle| {
             reviewerMentions.appendSliceAssumeCapacity("@");
             reviewerMentions.appendSliceAssumeCapacity(slackHandle);
@@ -561,9 +562,10 @@ fn generateSlackMessage(
             reviewerMentions.appendSliceAssumeCapacity("@");
             reviewerMentions.appendSliceAssumeCapacity(githubHandle);
         }
-        if (i < reviewers.len - 1) {
+        if (index < reviewers.len - 1) {
             reviewerMentions.appendSliceAssumeCapacity(" / ");
         }
+        index += 1;
     }
     return try std.fmt.bufPrint(
         buffer,
@@ -782,7 +784,13 @@ pub fn main() !void {
     const createPrOutput = std.mem.trim(u8, createPrResult.output, &std.ascii.whitespace);
     std.debug.assert(createPrOutput.len != 0);
     std.log.debug("create pr output {s}", .{createPrOutput});
-    const message = try generateSlackMessage(title, createPrOutput, reviewers.split(','), &config, &outputBuffer);
+    const message = try generateSlackMessage(
+        title,
+        createPrOutput,
+        std.mem.splitAny(u8, reviewers, ","),
+        &config,
+        &outputBuffer,
+    );
     try copyToClipboard(&shell, message);
     try writer.print("Pull request created: {s}\nThe PR URL and title have been copied to your clipboard in a Slack message format.\n", .{createPrOutput});
     try writer.print("{s}\n", .{message});
