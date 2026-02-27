@@ -1374,11 +1374,11 @@ pub fn main() !void {
     }
 
     var bodyFilePathBuffer: [128]u8 = undefined;
-    const bodyFilePath = if (try promptConfirmation("Write the body (y/N): ", reader, writer) orelse false)
+    const bodyFilePathOpt = if (try promptConfirmation("Write the body (y/N): ", reader, writer) orelse false)
         try promptEditor(&bodyFilePathBuffer)
     else
         null;
-    defer if (bodyFilePath) |filePath| std.fs.deleteFileAbsolute(filePath) catch {};
+    defer if (bodyFilePathOpt) |filePath| std.fs.deleteFileAbsolute(filePath) catch {};
 
     const repoResult = try shell.runCommand(
         &outputBuffer,
@@ -1446,11 +1446,18 @@ pub fn main() !void {
     }
     const reviewersArgument = reviewersArgumentBuffer[0..reviewersArgumentLen];
 
-    const createPrResult = try shell.runCommand(
-        &outputBuffer,
-        "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'{s}",
-        .{ base, headBranch, title, bodyFilePath orelse "", reviewersArgument, if (draft) " --draft" else "" },
-    );
+    const createPrResult = if (bodyFilePathOpt) |bodyFilePath|
+        try shell.runCommand(
+            &outputBuffer,
+            "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'{s}",
+            .{ base, headBranch, title, bodyFilePath orelse "", reviewersArgument, if (draft) " --draft" else "" },
+        )
+    else
+        try shell.runCommand(
+            &outputBuffer,
+            "gh pr create --base '{s}' --head '{s}' --title '{s}' --reviewer '{s}'{s}",
+            .{ base, headBranch, title, reviewersArgument, if (draft) " --draft" else "" },
+        );
     if (createPrResult.exitCode != 0) {
         try writer.print("Couldn't create pull request: {s}", .{createPrResult.output});
         try writer.flush();
