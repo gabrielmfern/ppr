@@ -172,6 +172,13 @@ const GitHub = struct {
 };
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer if (gpa.deinit() == .leak) {
+        std.log.err("Memory leak detected\n", .{});
+    };
+
+    const arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
 }
 
 test "GitHub keeps child shell alive between commands" {
