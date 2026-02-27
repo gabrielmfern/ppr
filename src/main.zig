@@ -177,8 +177,17 @@ pub fn main() !void {
         std.log.err("Memory leak detected\n", .{});
     };
 
-    const arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var stdin_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdin = std.fs.File.stdin().reader(&stdin_buffer);
+    var stdout = std.fs.File.stdout().writer(&stdout_buffer);
+
+    const title = try promptText(allocator, "Title: ", &stdin.interface, &stdout.interface);
+    std.log.info("title: {s}", .{title});
 }
 
 test "GitHub keeps child shell alive between commands" {
