@@ -160,6 +160,7 @@ const Shell = struct {
         var marker_storage: [marker_buffer_size]u8 = undefined;
         const marker = try std.fmt.bufPrint(&marker_storage, "__PPR_DONE_{d}__", .{self.next_marker_id});
 
+        std.log.debug("[shell] running {s}", .{command});
         try self.writeCommand(command, marker);
 
         var chunk: [1024]u8 = undefined;
@@ -284,7 +285,7 @@ pub fn main() !void {
         "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
         &outputBuffer,
     );
-    const base = std.mem.trim(u8, baseBranchResult.output, " ");
+    const base = std.mem.trim(u8, baseBranchResult.output, "\n");
     if (base.len == 0) {
         try writer.print("Could not determine repository's default branch\n", .{});
         try writer.flush();
@@ -298,7 +299,7 @@ pub fn main() !void {
         try writer.flush();
         return error.SafetyCheckFailed;
     }
-    const headBranch = std.mem.trim(u8, headBranchNameResult.output, " ");
+    const headBranch = std.mem.trim(u8, headBranchNameResult.output, "\n");
     std.log.debug("head branch {s}", .{headBranch});
     if (headBranch.len == 0 or std.mem.eql(u8, headBranch, "HEAD")) {
         try writer.print("HEAD is deatched, which means you're not checked out to a branch\n", .{});
@@ -336,7 +337,7 @@ pub fn main() !void {
     var commitRangeCommandBuffer: [256]u8 = undefined;
     const commitRangeCommand = try std.fmt.bufPrint(
         &commitRangeCommandBuffer,
-        "git log --oneline 'origin/{s}..HEAD'",
+        "git log --oneline 'origin/{s}..'",
         .{base},
     );
     const commitRangeResult = try shell.runCommand(commitRangeCommand, &outputBuffer);
