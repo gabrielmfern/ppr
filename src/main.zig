@@ -194,6 +194,7 @@ const Shell = struct {
     const stdout_buffer_size = 16 * 1024;
     const marker_buffer_size = 64;
     const marker_command_buffer_size = 256;
+    const command_buffer_size = 1024;
 
     const CommandResult = struct {
         output: []u8,
@@ -236,8 +237,16 @@ const Shell = struct {
         }
     }
 
-    pub fn runCommand(self: *Shell, command: []const u8, output_buffer: []u8) !CommandResult {
+    pub fn runCommand(
+        self: *Shell,
+        output_buffer: []u8,
+        comptime command_fmt: []const u8,
+        args: anytype,
+    ) !CommandResult {
         if (self.closed) return error.ProcessAlreadyClosed;
+
+        var command_storage: [command_buffer_size]u8 = undefined;
+        const command = try std.fmt.bufPrint(&command_storage, command_fmt, args);
 
         self.next_marker_id += 1;
         var marker_storage: [marker_buffer_size]u8 = undefined;
@@ -356,7 +365,7 @@ pub fn main() !void {
 
     var outputBuffer: [32 * 1024]u8 = undefined;
 
-    const ghAuthStatus = try shell.runCommand("gh auth status", &outputBuffer);
+    const ghAuthStatus = try shell.runCommand(&outputBuffer, "gh auth status", .{});
     if (ghAuthStatus.exitCode != 0) {
         try writer.print("You might not be logged in with `gh`. Run `gh auth login`\n", .{});
         try writer.flush();
@@ -365,8 +374,9 @@ pub fn main() !void {
     std.log.debug("auth status {s}", .{ghAuthStatus.output});
 
     const baseBranchResult = try shell.runCommand(
-        "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
         &outputBuffer,
+        "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
+        .{},
     );
     var baseBuffer: [128]u8 = undefined;
     const base = try copyTrimmed(baseBranchResult.output, &baseBuffer);
@@ -377,7 +387,7 @@ pub fn main() !void {
     }
     std.log.debug("base {s}", .{base});
 
-    const headBranchNameResult = try shell.runCommand("git rev-parse --abbrev-ref HEAD", &outputBuffer);
+    const headBranchNameResult = try shell.runCommand(&outputBuffer, "git rev-parse --abbrev-ref HEAD", .{});
     if (headBranchNameResult.exitCode != 0) {
         try writer.print("Could not determine current git branch\n", .{});
         try writer.flush();
@@ -398,26 +408,22 @@ pub fn main() !void {
         return error.SafetyCheckFailed;
     }
 
-    var branchPushedCommandBuffer: [256]u8 = undefined;
-    const branchPushedCommand = try std.fmt.bufPrint(
-        &branchPushedCommandBuffer,
+    const branchPushedResult = try shell.runCommand(
+        &outputBuffer,
         "git ls-remote --exit-code --heads origin '{s}' >/dev/null",
         .{headBranch},
     );
-    const branchPushedResult = try shell.runCommand(branchPushedCommand, &outputBuffer);
     if (branchPushedResult.exitCode != 0) {
         try writer.print("Current branch is not pushed to origin. Run `git push -u origin {s}` first.\n", .{headBranch});
         try writer.flush();
         return error.SafetyCheckFailed;
     }
 
-    var commitRangeCommandBuffer: [384]u8 = undefined;
-    const commitRangeCommand = try std.fmt.bufPrint(
-        &commitRangeCommandBuffer,
+    const commitRangeResult = try shell.runCommand(
+        &outputBuffer,
         "git log --oneline 'origin/{s}..origin/{s}'",
         .{ base, headBranch },
     );
-    const commitRangeResult = try shell.runCommand(commitRangeCommand, &outputBuffer);
     if (commitRangeResult.exitCode != 0) return error.SafetyCheckFailed;
     std.log.debug("commit range {s}", .{commitRangeResult.output});
     if (std.mem.trim(u8, commitRangeResult.output, " ").len == 0) {
@@ -426,13 +432,11 @@ pub fn main() !void {
         return error.SafetyCheckFailed;
     }
 
-    var existingPrCommandBuffer: [512]u8 = undefined;
-    const existingPrCommand = try std.fmt.bufPrint(
-        &existingPrCommandBuffer,
+    const existingPrResult = try shell.runCommand(
+        &outputBuffer,
         "gh pr list --head '{s}' --base '{s}' --state open --json url --jq '.[0].url // \"\"'",
         .{ headBranch, base },
     );
-    const existingPrResult = try shell.runCommand(existingPrCommand, &outputBuffer);
     if (existingPrResult.exitCode != 0) return error.SafetyCheckFailed;
     if (std.mem.trim(u8, existingPrResult.output, "\n").len != 0) {
         std.log.debug("{s}", .{existingPrResult.output});
@@ -441,7 +445,7 @@ pub fn main() !void {
         return error.SafetyCheckFailed;
     }
 
-    const worktreeStatusResult = try shell.runCommand("git status -sb", &outputBuffer);
+    const worktreeStatusResult = try shell.runCommand(&outputBuffer, "git status -sb", .{});
     if (!worktreeIsClean(worktreeStatusResult.output)) {
         const continue_anyway = (try promptConfirmation("You have something to commit. Do it anyway? (Y/n)", reader, writer)) orelse true;
         if (!continue_anyway) {
@@ -464,25 +468,24 @@ pub fn main() !void {
     }
 
     const repoResult = try shell.runCommand(
-        "gh repo view --json nameWithOwner -q .nameWithOwner",
         &outputBuffer,
+        "gh repo view --json nameWithOwner -q .nameWithOwner",
+        .{},
     );
     if (repoResult.exitCode != 0) return error.SafetyCheckFailed;
     var repoBuffer: [256]u8 = undefined;
     const repo = try copyTrimmed(repoResult.output, &repoBuffer);
 
-    const currentUserResult = try shell.runCommand("gh api user --jq .login", &outputBuffer);
+    const currentUserResult = try shell.runCommand(&outputBuffer, "gh api user --jq .login", .{});
     if (currentUserResult.exitCode != 0) return error.SafetyCheckFailed;
     var currentUserBuffer: [128]u8 = undefined;
     const currentUser = try copyTrimmed(currentUserResult.output, &currentUserBuffer);
 
-    var collaboratorsCommandBuffer: [512]u8 = undefined;
-    const collaboratorsCommand = try std.fmt.bufPrint(
-        &collaboratorsCommandBuffer,
+    const collaboratorsResult = try shell.runCommand(
+        &outputBuffer,
         "gh api 'repos/{s}/collaborators' --paginate --jq '.[] | select(.login != \"{s}\") | .login'",
         .{ repo, currentUser },
     );
-    const collaboratorsResult = try shell.runCommand(collaboratorsCommand, &outputBuffer);
     const collaboratorsList = if (collaboratorsResult.exitCode == 0)
         std.mem.trim(u8, collaboratorsResult.output, &std.ascii.whitespace)
     else
@@ -492,13 +495,11 @@ pub fn main() !void {
         try writer.flush();
     }
 
-    var teamsCommandBuffer: [512]u8 = undefined;
-    const teamsCommand = try std.fmt.bufPrint(
-        &teamsCommandBuffer,
+    const teamsResult = try shell.runCommand(
+        &outputBuffer,
         "gh api 'repos/{s}/teams' --paginate --jq '.[] | .organization.login + \"/\" + .slug'",
         .{repo},
     );
-    const teamsResult = try shell.runCommand(teamsCommand, &outputBuffer);
     const teamsList = if (teamsResult.exitCode == 0)
         std.mem.trim(u8, teamsResult.output, &std.ascii.whitespace)
     else
@@ -531,12 +532,12 @@ test "Shell keeps child shell alive between commands" {
     defer shell.deinit();
 
     var first_output_buffer: [64]u8 = undefined;
-    const first = try shell.runCommand("keep_alive_var=42", &first_output_buffer);
+    const first = try shell.runCommand(&first_output_buffer, "keep_alive_var=42", .{});
     try std.testing.expectEqual(@as(u8, 0), first.exitCode);
     try std.testing.expectEqualStrings("", first.output);
 
     var second_output_buffer: [64]u8 = undefined;
-    const second = try shell.runCommand("echo \"$keep_alive_var\"", &second_output_buffer);
+    const second = try shell.runCommand(&second_output_buffer, "echo \"$keep_alive_var\"", .{});
     try std.testing.expectEqual(@as(u8, 0), second.exitCode);
     try std.testing.expectEqualStrings("42\n", second.output);
 }
