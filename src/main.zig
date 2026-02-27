@@ -1,6 +1,32 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const RawTerminalMode = struct {
+    fd: std.posix.fd_t,
+    previous: std.posix.termios,
+
+    fn enter(fd: std.posix.fd_t) !@This() {
+        const previous = try std.posix.tcgetattr(fd);
+        var current = previous;
+
+        current.iflag.ICRNL = false;
+        current.iflag.IXON = false;
+        current.lflag.ICANON = false;
+        current.lflag.ECHO = false;
+        current.lflag.IEXTEN = false;
+
+        try std.posix.tcsetattr(fd, .FLUSH, current);
+        return .{
+            .fd = fd,
+            .previous = previous,
+        };
+    }
+
+    fn restore(self: *const @This()) void {
+        std.posix.tcsetattr(self.fd, .FLUSH, self.previous) catch {};
+    }
+};
+
 fn promptText(
     prompt: []const u8,
     reader: *std.Io.Reader,
@@ -9,32 +35,6 @@ fn promptText(
 ) ![]u8 {
     try writer.writeAll(prompt);
     try writer.flush();
-
-    const RawTerminalMode = struct {
-        fd: std.posix.fd_t,
-        previous: std.posix.termios,
-
-        fn enter(fd: std.posix.fd_t) !@This() {
-            const previous = try std.posix.tcgetattr(fd);
-            var current = previous;
-
-            current.iflag.ICRNL = false;
-            current.iflag.IXON = false;
-            current.lflag.ICANON = false;
-            current.lflag.ECHO = false;
-            current.lflag.IEXTEN = false;
-
-            try std.posix.tcsetattr(fd, .FLUSH, current);
-            return .{
-                .fd = fd,
-                .previous = previous,
-            };
-        }
-
-        fn restore(self: *const @This()) void {
-            std.posix.tcsetattr(self.fd, .FLUSH, self.previous) catch {};
-        }
-    };
 
     var liveEditing = !builtin.is_test and
         std.posix.isatty(std.posix.STDIN_FILENO) and
@@ -582,32 +582,6 @@ fn pickMultiple(
 
     const maxOptions = 512;
     if (options.len > maxOptions) return error.StreamTooLong;
-
-    const RawTerminalMode = struct {
-        fd: std.posix.fd_t,
-        previous: std.posix.termios,
-
-        fn enter(fd: std.posix.fd_t) !@This() {
-            const previous = try std.posix.tcgetattr(fd);
-            var current = previous;
-
-            current.iflag.ICRNL = false;
-            current.iflag.IXON = false;
-            current.lflag.ICANON = false;
-            current.lflag.ECHO = false;
-            current.lflag.IEXTEN = false;
-
-            try std.posix.tcsetattr(fd, .FLUSH, current);
-            return .{
-                .fd = fd,
-                .previous = previous,
-            };
-        }
-
-        fn restore(self: *const @This()) void {
-            std.posix.tcsetattr(self.fd, .FLUSH, self.previous) catch {};
-        }
-    };
 
     var liveSelection = !builtin.is_test and
         std.posix.isatty(std.posix.STDIN_FILENO) and
@@ -1414,6 +1388,7 @@ pub fn main() !void {
 
     const teamsResult = try shell.runCommand(
         &outputBuffer,
+        // TODO: replace this with somethign else, seems like it requires elevated permissions
         "gh api 'repos/{s}/teams' --paginate --jq '.[] | .organization.login + \"/\" + .slug'",
         .{repo},
     );
