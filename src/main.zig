@@ -486,33 +486,98 @@ fn collectUniqueLines(input: []const u8, output: []([]const u8), outputLen: *usi
     }
 }
 
-fn joinCommaSeparatedSlices(input: []const []const u8, outputBuffer: []u8) ![]const u8 {
-    var cursor: usize = 0;
-    for (input) |item| {
-        if (cursor != 0) {
-            if (cursor >= outputBuffer.len) return error.StreamTooLong;
-            outputBuffer[cursor] = ',';
-            cursor += 1;
-        }
-        if (cursor + item.len > outputBuffer.len) return error.StreamTooLong;
-        @memcpy(outputBuffer[cursor .. cursor + item.len], item);
-        cursor += item.len;
-    }
-    return outputBuffer[0..cursor];
-}
-
 fn reviewerDisplayHandle(reviewer: []const u8, config: *const Config) []const u8 {
     return config.getSlackHandle(reviewer) orelse reviewer;
 }
 
-fn pickMultiple(
+fn writePicker(
+    w: *std.Io.Writer,
     options: []const []const u8,
-    displayOptions: []const []const u8,
+    selected: []const bool,
+    cursor: usize,
+    previousLines: *usize,
+) !void {
+    if (previousLines.* > 0) {
+        try w.print("\x1b[{d}A\r", .{previousLines.*});
+    }
+    try w.writeAll("\x1b[J");
+    try w.writeAll("\x1b[36mReviewers (up/down to move, space to toggle, enter to confirm)\x1b[0m\n");
+
+    const windowSize: usize = 5;
+    var start: usize = 0;
+    if (options.len > windowSize) {
+        const halfWindow = windowSize / 2;
+        if (cursor > halfWindow) {
+            start = cursor - halfWindow;
+        }
+        const maxStart = options.len - windowSize;
+        if (start > maxStart) {
+            start = maxStart;
+        }
+    }
+    const end = @min(options.len, start + windowSize);
+
+    var linesRendered: usize = 1;
+    if (start > 0) {
+        try w.print("\x1b[2m  ↑ {d} more above\x1b[0m\x1b[K\n", .{start});
+        linesRendered += 1;
+    }
+    for (start..end) |idx| {
+        const option = options[idx];
+        const indicator = if (idx == cursor) "\x1b[32m>\x1b[0m" else " ";
+        const marker = if (selected[idx]) "\x1b[33mx\x1b[0m" else " ";
+        if (selected[idx]) {
+            try w.print("{s} [{s}] \x1b[33m{s}\x1b[0m\x1b[K\n", .{ indicator, marker, option });
+        } else {
+            try w.print("{s} [{s}] {s}\x1b[K\n", .{ indicator, marker, option });
+        }
+        linesRendered += 1;
+    }
+    if (end < options.len) {
+        try w.print("\x1b[2m  ↓ {d} more below\x1b[0m\x1b[K\n", .{options.len - end});
+        linesRendered += 1;
+    }
+
+    var selectedBuffer: [2048]u8 = undefined;
+    var selectedLen: usize = 0;
+    var wroteAny = false;
+    for (options, 0..) |option, idx| {
+        if (!selected[idx]) continue;
+
+        if (wroteAny) {
+            if (selectedLen + 2 > selectedBuffer.len) break;
+            @memcpy(selectedBuffer[selectedLen .. selectedLen + 2], ", ");
+            selectedLen += 2;
+        }
+        const remaining = selectedBuffer.len - selectedLen;
+        if (option.len > remaining) {
+            if (remaining >= 3) {
+                @memcpy(selectedBuffer[selectedLen .. selectedLen + 3], "...");
+                selectedLen += 3;
+            }
+            break;
+        }
+        @memcpy(selectedBuffer[selectedLen .. selectedLen + option.len], option);
+        selectedLen += option.len;
+        wroteAny = true;
+    }
+
+    if (wroteAny) {
+        try w.print("\x1b[36mSelected:\x1b[0m {s}\x1b[K\n", .{selectedBuffer[0..selectedLen]});
+    } else {
+        try w.writeAll("\x1b[2mSelected: none\x1b[0m\x1b[K\n");
+    }
+    linesRendered += 1;
+    try w.flush();
+    previousLines.* = linesRendered;
+}
+
+fn pickMultiple(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
-    selectionBuffer: []([]const u8),
+    options: []const []const u8,
+    selectionBuffer: [][]const u8,
 ) ![]const []const u8 {
-    if (options.len != displayOptions.len) return error.StreamTooLong;
     if (options.len > selectionBuffer.len) return error.StreamTooLong;
 
     const maxOptions = 512;
@@ -560,97 +625,12 @@ fn pickMultiple(
         raw.restore();
     };
 
-    const renderPicker = struct {
-        fn call(
-            w: *std.Io.Writer,
-            items: []const []const u8,
-            labels: []const []const u8,
-            selected: []const bool,
-            cursor: usize,
-            previousLines: *usize,
-        ) !void {
-            if (previousLines.* > 0) {
-                try w.print("\x1b[{d}A\r", .{previousLines.*});
-            }
-            try w.writeAll("\x1b[J");
-            try w.writeAll("\x1b[36mReviewers (up/down to move, space to toggle, enter to confirm)\x1b[0m\n");
-
-            const windowSize: usize = 5;
-            var start: usize = 0;
-            if (items.len > windowSize) {
-                const halfWindow = windowSize / 2;
-                if (cursor > halfWindow) {
-                    start = cursor - halfWindow;
-                }
-                const maxStart = items.len - windowSize;
-                if (start > maxStart) {
-                    start = maxStart;
-                }
-            }
-            const end = @min(items.len, start + windowSize);
-
-            var linesRendered: usize = 1;
-            if (start > 0) {
-                try w.print("\x1b[2m  ↑ {d} more above\x1b[0m\x1b[K\n", .{start});
-                linesRendered += 1;
-            }
-            for (start..end) |idx| {
-                const label = labels[idx];
-                const indicator = if (idx == cursor) "\x1b[32m>\x1b[0m" else " ";
-                const marker = if (selected[idx]) "\x1b[33mx\x1b[0m" else " ";
-                if (selected[idx]) {
-                    try w.print("{s} [{s}] \x1b[33m{s}\x1b[0m\x1b[K\n", .{ indicator, marker, label });
-                } else {
-                    try w.print("{s} [{s}] {s}\x1b[K\n", .{ indicator, marker, label });
-                }
-                linesRendered += 1;
-            }
-            if (end < items.len) {
-                try w.print("\x1b[2m  ↓ {d} more below\x1b[0m\x1b[K\n", .{items.len - end});
-                linesRendered += 1;
-            }
-
-            var selectedBuffer: [2048]u8 = undefined;
-            var selectedLen: usize = 0;
-            var wroteAny = false;
-            for (labels, 0..) |label, idx| {
-                if (!selected[idx]) continue;
-
-                if (wroteAny) {
-                    if (selectedLen + 2 > selectedBuffer.len) break;
-                    @memcpy(selectedBuffer[selectedLen .. selectedLen + 2], ", ");
-                    selectedLen += 2;
-                }
-                const remaining = selectedBuffer.len - selectedLen;
-                if (label.len > remaining) {
-                    if (remaining >= 3) {
-                        @memcpy(selectedBuffer[selectedLen .. selectedLen + 3], "...");
-                        selectedLen += 3;
-                    }
-                    break;
-                }
-                @memcpy(selectedBuffer[selectedLen .. selectedLen + label.len], label);
-                selectedLen += label.len;
-                wroteAny = true;
-            }
-
-            if (wroteAny) {
-                try w.print("\x1b[36mSelected:\x1b[0m {s}\x1b[K\n", .{selectedBuffer[0..selectedLen]});
-            } else {
-                try w.writeAll("\x1b[2mSelected: none\x1b[0m\x1b[K\n");
-            }
-            linesRendered += 1;
-            try w.flush();
-            previousLines.* = linesRendered;
-        }
-    }.call;
-
     var selectedFlags = std.mem.zeroes([maxOptions]bool);
     var cursor: usize = 0;
     var renderedLines: usize = 0;
 
     if (liveSelection) {
-        try renderPicker(writer, options, displayOptions, selectedFlags[0..options.len], cursor, &renderedLines);
+        try writePicker(writer, options, selectedFlags[0..options.len], cursor, &renderedLines);
     }
 
     while (true) {
@@ -724,7 +704,7 @@ fn pickMultiple(
 
         if (submitted) break;
         if (liveSelection and changed) {
-            try renderPicker(writer, options, displayOptions, selectedFlags[0..options.len], cursor, &renderedLines);
+            try writePicker(writer, options, selectedFlags[0..options.len], cursor, &renderedLines);
         }
     }
 
@@ -1004,18 +984,6 @@ fn worktreeIsClean(statusSbOutput: []const u8) bool {
 const CliOptions = struct {
     draft: bool = false,
 };
-
-fn parseCliOptions(args: []const [:0]const u8) CliOptions {
-    var options = CliOptions{};
-
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--draft")) {
-            options.draft = true;
-        }
-    }
-
-    return options;
-}
 
 fn promptEditor(pathBuffer: []u8) ![]u8 {
     return promptEditorWithScript("${EDITOR:-vi} \"$1\"", pathBuffer);
@@ -1299,7 +1267,13 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
-    const cliOptions = parseCliOptions(args);
+
+    var draft = false;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--draft")) {
+            draft = true;
+        }
+    }
 
     var outputBuffer: [32 * 1024]u8 = undefined;
 
@@ -1403,8 +1377,8 @@ pub fn main() !void {
     const bodyFilePath = if (try promptConfirmation("Write the body (y/N): ", reader, writer) orelse false)
         try promptEditor(&bodyFilePathBuffer)
     else
-        try createTempEditorFile(&bodyFilePathBuffer);
-    defer std.fs.deleteFileAbsolute(bodyFilePath) catch {};
+        null;
+    defer if (bodyFilePath) |filePath| std.fs.deleteFileAbsolute(filePath) catch {};
 
     const repoResult = try shell.runCommand(
         &outputBuffer,
@@ -1443,7 +1417,7 @@ pub fn main() !void {
         "gh api 'repos/{s}/teams' --paginate --jq '.[] | .organization.login + \"/\" + .slug'",
         .{repo},
     );
-    var teamsListBuffer: [32 * 1024]u8 = undefined;
+    var teamsListBuffer: [1024]u8 = undefined;
     const teamsList = if (teamsResult.exitCode == 0)
         try copyTrimmed(teamsResult.output, &teamsListBuffer)
     else
@@ -1453,37 +1427,42 @@ pub fn main() !void {
     var reviewerChoicesLen: usize = 0;
     try collectUniqueLines(collaboratorsList, &reviewerChoicesBuffer, &reviewerChoicesLen);
     try collectUniqueLines(teamsList, &reviewerChoicesBuffer, &reviewerChoicesLen);
-    const reviewerChoices = reviewerChoicesBuffer[0..reviewerChoicesLen];
+    const reviewersAvailable = reviewerChoicesBuffer[0..reviewerChoicesLen];
 
-    var reviewerDisplayBuffer: [512][]const u8 = undefined;
-    for (reviewerChoices, 0..) |reviewer, idx| {
-        reviewerDisplayBuffer[idx] = reviewerDisplayHandle(reviewer, &config);
-    }
-    const reviewerDisplay = reviewerDisplayBuffer[0..reviewerChoices.len];
-
-    var selectedReviewersBuffer: [512][]const u8 = undefined;
-    const selectedReviewers = if (reviewerChoices.len == 0)
-        selectedReviewersBuffer[0..0]
+    var selectedReviewersBuffer: [4][]const u8 = undefined;
+    const selectedReviewers = if (reviewersAvailable.len == 0)
+        &.{}
     else
-        try pickMultiple(reviewerChoices, reviewerDisplay, reader, writer, &selectedReviewersBuffer);
+        try pickMultiple(reader, writer, reviewersAvailable, &selectedReviewersBuffer);
 
-    var reviewersCsvBuffer: [2048]u8 = undefined;
-    const reviewersCsv = try joinCommaSeparatedSlices(selectedReviewers, &reviewersCsvBuffer);
-
-    const draftArg = if (cliOptions.draft) " --draft" else "";
+    var reviewersArgumentBuffer: [1024]u8 = undefined;
+    var reviewersArgumentLen: usize = 0;
+    for (selectedReviewers, 0..) |reviewer, i| {
+        if (i != 0) {
+            reviewersArgumentBuffer[i - 1] = ',';
+        }
+        @memcpy(reviewersArgumentBuffer[i..(i + reviewer.len)], reviewer);
+        reviewersArgumentLen += reviewer.len;
+    }
+    const reviewersArgument = reviewersArgumentBuffer[0..reviewersArgumentLen];
 
     const createPrResult = try shell.runCommand(
         &outputBuffer,
         "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'{s}",
-        .{ base, headBranch, title, bodyFilePath, reviewersCsv, draftArg },
+        .{ base, headBranch, title, bodyFilePath orelse "", reviewersArgument, if (draft) " --draft" else "" },
     );
-    if (createPrResult.exitCode != 0) return error.PullRequestCreateFailed;
+    if (createPrResult.exitCode != 0) {
+        try writer.print("Couldn't create pull request: {s}", .{createPrResult.output});
+        try writer.flush();
+        return error.PullRequestCreateFailed;
+    }
 
-    var createPrUrlBuffer: [4096]u8 = undefined;
+    var createPrUrlBuffer: [512]u8 = undefined;
     const createPrUrl = try copyTrimmed(createPrResult.output, &createPrUrlBuffer);
     std.debug.assert(createPrUrl.len != 0);
+
     std.log.debug("create pr output {s}", .{createPrUrl});
-    var messageBuffer: [32 * 1024]u8 = undefined;
+    var messageBuffer: [1024]u8 = undefined;
     const message = try generateSlackMessage(
         title,
         createPrUrl,
@@ -1492,7 +1471,7 @@ pub fn main() !void {
         &messageBuffer,
     );
     try copyToClipboard(&shell, message);
-    try writer.print("Pull request created: {s}\nThe PR URL and title have been copied to your clipboard in a Slack message format.\n", .{createPrUrl});
+    try writer.print("The slack message was copied to your clipboard.\n", .{});
     try writer.print("{s}\n", .{message});
     try writer.flush();
 }
@@ -1720,24 +1699,6 @@ test "worktreeIsClean returns false when status has file changes" {
     try std.testing.expect(!worktreeIsClean("## main...origin/main\n M src/main.zig\n"));
 }
 
-test "parseCliOptions returns default options when no flags are passed" {
-    const args = [_][:0]const u8{"ppr"};
-    const options = parseCliOptions(args[0..]);
-    try std.testing.expect(!options.draft);
-}
-
-test "parseCliOptions enables draft mode when --draft is passed" {
-    const args = [_][:0]const u8{ "ppr", "--draft" };
-    const options = parseCliOptions(args[0..]);
-    try std.testing.expect(options.draft);
-}
-
-test "parseCliOptions ignores unknown flags" {
-    const args = [_][:0]const u8{ "ppr", "--nope" };
-    const options = parseCliOptions(args[0..]);
-    try std.testing.expect(!options.draft);
-}
-
 test "normalizeCommaSeparated trims values and drops empties" {
     var out: [64]u8 = undefined;
     const normalized = try normalizeCommaSeparated(" alice, bob ,,org/team ", &out);
@@ -1758,13 +1719,6 @@ test "collectUniqueLines merges newline lists without duplicates" {
     try std.testing.expectEqualStrings("org/team", values[2]);
 }
 
-test "joinCommaSeparatedSlices joins selected values" {
-    const input = [_][]const u8{ "alice", "org/team", "bob" };
-    var out: [64]u8 = undefined;
-    const joined = try joinCommaSeparatedSlices(input[0..], &out);
-    try std.testing.expectEqualStrings("alice,org/team,bob", joined);
-}
-
 test "reviewerDisplayHandle uses slack mapping when available" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1782,13 +1736,12 @@ test "reviewerDisplayHandle uses slack mapping when available" {
 
 test "pickMultiple selects options with arrow keys and space" {
     const options = [_][]const u8{ "alice", "bob", "org/team" };
-    const labels = [_][]const u8{ "@alice", "@bob", "@platform" };
     var reader = std.Io.Reader.fixed("\x1b[B \x1b[B \n");
     var outputBuffer: [8]u8 = undefined;
     var writer = std.Io.Writer.fixed(&outputBuffer);
     var selectedBuffer: [3][]const u8 = undefined;
 
-    const selected = try pickMultiple(options[0..], labels[0..], &reader, &writer, &selectedBuffer);
+    const selected = try pickMultiple(options[0..], &reader, &writer, &selectedBuffer);
     try std.testing.expectEqual(@as(usize, 2), selected.len);
     try std.testing.expectEqualStrings("bob", selected[0]);
     try std.testing.expectEqualStrings("org/team", selected[1]);
