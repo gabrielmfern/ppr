@@ -31,21 +31,9 @@ fn promptYesNo(
     writer: *std.Io.Writer,
 ) !bool {
     var input_buffer: [16]u8 = undefined;
-
     const text = try promptText(prompt, reader, writer, &input_buffer);
-
     const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
-    if (trimmed.len == 0) {
-        return false;
-    }
-    if (std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes")) {
-        return true;
-    }
-    if (std.ascii.eqlIgnoreCase(trimmed, "n") or std.ascii.eqlIgnoreCase(trimmed, "no")) {
-        return false;
-    }
-
-    return false;
+    return std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes");
 }
 
 const GitHub = struct {
@@ -198,10 +186,10 @@ pub fn main() !void {
     var stdin = std.fs.File.stdin().reader(&stdin_buffer);
     var stdout = std.fs.File.stdout().writer(&stdout_buffer);
 
-    var title_buffer: [512]u8 = undefined;
     const reader = &stdin.interface;
     const writer = &stdout.interface;
 
+    var title_buffer: [512]u8 = undefined;
     const title = try promptText("Title: ", reader, writer, &title_buffer);
     std.log.info("title: {s}", .{title});
 
@@ -283,15 +271,12 @@ test "promptYesNo defaults to no on empty input" {
     try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
 }
 
-test "promptYesNo retries until valid answer" {
-    var reader = std.Io.Reader.fixed("maybe\nn\n");
-    var output_storage: [128]u8 = undefined;
+test "promptYesNo returns false for invalid answer" {
+    var reader = std.Io.Reader.fixed("maybe\n");
+    var output_storage: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_storage);
 
     const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
     try std.testing.expect(!accepted);
-    try std.testing.expectEqualStrings(
-        "Continue? (y/N): Please enter yes or no.\nContinue? (y/N): ",
-        writer.buffered(),
-    );
+    try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
 }
