@@ -245,24 +245,6 @@ const Shell = struct {
     }
 };
 
-fn runCommandExpectSuccess(
-    shell: *Shell,
-    command: []const u8,
-    output_buffer: []u8,
-    check_name: []const u8,
-) !Shell.CommandResult {
-    const result = try shell.runCommand(command, output_buffer);
-    if (result.exitCode != 0) {
-        std.log.err("Safety check failed: {s} (exit code {d})", .{ check_name, result.exitCode });
-        const err_output = std.mem.trim(u8, result.output, &std.ascii.whitespace);
-        if (err_output.len != 0) {
-            std.log.err("{s}", .{err_output});
-        }
-        return error.SafetyCheckFailed;
-    }
-    return result;
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) {
