@@ -42,6 +42,13 @@ fn promptConfirmation(
     return null;
 }
 
+fn copyTrimmed(input: []const u8, output_buffer: []u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
+    if (trimmed.len > output_buffer.len) return error.StreamTooLong;
+    @memcpy(output_buffer[0..trimmed.len], trimmed);
+    return output_buffer[0..trimmed.len];
+}
+
 fn worktreeIsClean(status_sb_output: []const u8) bool {
     var lines = std.mem.tokenizeScalar(u8, status_sb_output, '\n');
     _ = lines.next() orelse return false;
@@ -285,7 +292,8 @@ pub fn main() !void {
         "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
         &outputBuffer,
     );
-    const base = std.mem.trim(u8, baseBranchResult.output, "\n");
+    var baseBuffer: [128]u8 = undefined;
+    const base = try copyTrimmed(baseBranchResult.output, &baseBuffer);
     if (base.len == 0) {
         try writer.print("Could not determine repository's default branch\n", .{});
         try writer.flush();
@@ -299,7 +307,8 @@ pub fn main() !void {
         try writer.flush();
         return error.SafetyCheckFailed;
     }
-    const headBranch = std.mem.trim(u8, headBranchNameResult.output, "\n");
+    var headBranchBuffer: [128]u8 = undefined;
+    const headBranch = try copyTrimmed(headBranchNameResult.output, &headBranchBuffer);
     std.log.debug("head branch {s}", .{headBranch});
     if (headBranch.len == 0 or std.mem.eql(u8, headBranch, "HEAD")) {
         try writer.print("HEAD is deatched, which means you're not checked out to a branch\n", .{});
@@ -315,7 +324,8 @@ pub fn main() !void {
 
     const worktreeStatusResult = try shell.runCommand("git status -sb", &outputBuffer);
     if (!worktreeIsClean(worktreeStatusResult.output)) {
-        if (try promptConfirmation("You have something to commit. Do it anyway? (Y/n)", reader, writer) orelse true == false) {
+        const continue_anyway = (try promptConfirmation("You have something to commit. Do it anyway? (Y/n)", reader, writer)) orelse true;
+        if (!continue_anyway) {
             return;
         }
     }
@@ -327,6 +337,7 @@ pub fn main() !void {
         .{ headBranch, base },
     );
     const existingPrResult = try shell.runCommand(existingPrCommand, &outputBuffer);
+    if (existingPrResult.exitCode != 0) return error.SafetyCheckFailed;
     if (std.mem.trim(u8, existingPrResult.output, "\n").len != 0) {
         std.log.debug("{s}", .{existingPrResult.output});
         try writer.print("An open PR already exists: {s}\n", .{existingPrResult.output});
@@ -337,10 +348,11 @@ pub fn main() !void {
     var commitRangeCommandBuffer: [256]u8 = undefined;
     const commitRangeCommand = try std.fmt.bufPrint(
         &commitRangeCommandBuffer,
-        "git log --oneline 'origin/{s}..'",
+        "git log --oneline 'origin/{s}..HEAD'",
         .{base},
     );
     const commitRangeResult = try shell.runCommand(commitRangeCommand, &outputBuffer);
+    if (commitRangeResult.exitCode != 0) return error.SafetyCheckFailed;
     std.log.debug("commit range {s}", .{commitRangeResult.output});
     if (std.mem.trim(u8, commitRangeResult.output, " ").len == 0) {
         return error.SafetyCheckFailed;
