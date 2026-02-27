@@ -572,6 +572,24 @@ fn generateSlackMessage(
     );
 }
 
+fn copyToClipboard(shell: *Shell, text: []const u8) !void {
+    var tempPathBuffer: [128]u8 = undefined;
+    const tempPath = try createTempEditorFile(&tempPathBuffer);
+    defer std.fs.deleteFileAbsolute(tempPath) catch {};
+
+    var tempFile = try std.fs.createFileAbsolute(tempPath, .{ .truncate = true });
+    defer tempFile.close();
+    try tempFile.writeAll(text);
+
+    var outputBuffer: [256]u8 = undefined;
+    const result = switch (builtin.os.tag) {
+        .macos => try shell.runCommand(&outputBuffer, "cat '{s}' | pbcopy", .{tempPath}),
+        .linux => try shell.runCommand(&outputBuffer, "cat '{s}' | wl-copy", .{tempPath}),
+        else => return error.UnsupportedOperatingSystem,
+    };
+    if (result.exitCode != 0) return error.ClipboardCommandFailed;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) {
@@ -762,10 +780,13 @@ pub fn main() !void {
     if (createPrResult.exitCode != 0) return error.PullRequestCreateFailed;
 
     const createPrOutput = std.mem.trim(u8, createPrResult.output, &std.ascii.whitespace);
-    if (createPrOutput.len != 0) {
-        try writer.print("{s}\n", .{createPrOutput});
-        try writer.flush();
-    }
+    std.debug.assert(createPrOutput.len != 0);
+    std.log.debug("create pr output {s}", .{createPrOutput});
+    const message = try generateSlackMessage(title, createPrOutput, reviewers.split(','), &config, &outputBuffer);
+    try copyToClipboard(&shell, message);
+    try writer.print("Pull request created: {s}\nThe PR URL and title have been copied to your clipboard in a Slack message format.\n", .{createPrOutput});
+    try writer.print("{s}\n", .{message});
+    try writer.flush();
 }
 
 test "Shell keeps child shell alive between commands" {
