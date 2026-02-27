@@ -71,60 +71,6 @@ fn normalizeCommaSeparated(input: []const u8, output_buffer: []u8) ![]u8 {
     return output_buffer[0..cursor];
 }
 
-fn createPullRequest(
-    allocator: std.mem.Allocator,
-    base: []const u8,
-    head_branch: []const u8,
-    title: []const u8,
-    body_file_path: []const u8,
-    reviewers: []const u8,
-) !void {
-    var argv: [16][]const u8 = undefined;
-    var argc: usize = 0;
-
-    argv[argc] = "gh";
-    argc += 1;
-    argv[argc] = "pr";
-    argc += 1;
-    argv[argc] = "create";
-    argc += 1;
-    argv[argc] = "--base";
-    argc += 1;
-    argv[argc] = base;
-    argc += 1;
-    argv[argc] = "--head";
-    argc += 1;
-    argv[argc] = head_branch;
-    argc += 1;
-    argv[argc] = "--title";
-    argc += 1;
-    argv[argc] = title;
-    argc += 1;
-    argv[argc] = "--body-file";
-    argc += 1;
-    argv[argc] = body_file_path;
-    argc += 1;
-
-    if (reviewers.len != 0) {
-        argv[argc] = "--reviewer";
-        argc += 1;
-        argv[argc] = reviewers;
-        argc += 1;
-    }
-
-    var child = std.process.Child.init(argv[0..argc], allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| if (code != 0) return error.PullRequestCreateFailed,
-        else => return error.PullRequestCreateFailed,
-    }
-}
-
 fn worktreeIsClean(status_sb_output: []const u8) bool {
     var lines = std.mem.tokenizeScalar(u8, status_sb_output, '\n');
     _ = lines.next() orelse return false;
@@ -194,7 +140,7 @@ const Shell = struct {
     const stdout_buffer_size = 16 * 1024;
     const marker_buffer_size = 64;
     const marker_command_buffer_size = 256;
-    const command_buffer_size = 1024;
+    const command_buffer_size = 8192;
 
     const CommandResult = struct {
         output: []u8,
@@ -517,14 +463,18 @@ pub fn main() !void {
         reviewers = try normalizeCommaSeparated(reviewersInput, &reviewersBuffer);
     }
 
-    var bodyFilePathBuffer: [128]u8 = undefined;
-    const bodyFilePath = try createTempEditorFile(&bodyFilePathBuffer);
-    defer std.fs.deleteFileAbsolute(bodyFilePath) catch {};
-    var bodyFile = try std.fs.createFileAbsolute(bodyFilePath, .{});
-    defer bodyFile.close();
-    try bodyFile.writeAll(body);
+    const createPrResult = try shell.runCommand(
+        &outputBuffer,
+        "gh pr create --base '{s}' --head '{s}' --title '{s}' --body '{s}' --reviewer '{s}'",
+        .{ base, headBranch, title, body, reviewers },
+    );
+    if (createPrResult.exitCode != 0) return error.PullRequestCreateFailed;
 
-    try createPullRequest(allocator, base, headBranch, title, bodyFilePath, reviewers);
+    const createPrOutput = std.mem.trim(u8, createPrResult.output, &std.ascii.whitespace);
+    if (createPrOutput.len != 0) {
+        try writer.print("{s}\n", .{createPrOutput});
+        try writer.flush();
+    }
 }
 
 test "Shell keeps child shell alive between commands" {
