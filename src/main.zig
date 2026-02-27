@@ -335,6 +335,22 @@ fn worktreeIsClean(statusSbOutput: []const u8) bool {
     return lines.next() == null;
 }
 
+const CliOptions = struct {
+    draft: bool = false,
+};
+
+fn parseCliOptions(args: []const [:0]const u8) CliOptions {
+    var options = CliOptions{};
+
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--draft")) {
+            options.draft = true;
+        }
+    }
+
+    return options;
+}
+
 fn promptEditor(pathBuffer: []u8) ![]u8 {
     return promptEditorWithScript("${EDITOR:-vi} \"$1\"", pathBuffer);
 }
@@ -615,6 +631,10 @@ pub fn main() !void {
     const reader = &stdin.interface;
     const writer = &stdout.interface;
 
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    const cliOptions = parseCliOptions(args);
+
     var outputBuffer: [32 * 1024]u8 = undefined;
 
     const ghAuthStatus = try shell.runCommand(&outputBuffer, "gh auth status", .{});
@@ -777,11 +797,12 @@ pub fn main() !void {
         const reviewersInput = try promptText("Reviewers (comma-separated, optional): ", reader, writer, &reviewerInputBuffer);
         reviewers = try normalizeCommaSeparated(reviewersInput, &reviewersBuffer);
     }
+    const draftArg = if (cliOptions.draft) " --draft" else "";
 
     const createPrResult = try shell.runCommand(
         &outputBuffer,
-        "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'",
-        .{ base, headBranch, title, bodyFilePath, reviewers },
+        "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'{s}",
+        .{ base, headBranch, title, bodyFilePath, reviewers, draftArg },
     );
     if (createPrResult.exitCode != 0) return error.PullRequestCreateFailed;
 
@@ -921,6 +942,24 @@ test "worktreeIsClean returns true when status has only branch line" {
 
 test "worktreeIsClean returns false when status has file changes" {
     try std.testing.expect(!worktreeIsClean("## main...origin/main\n M src/main.zig\n"));
+}
+
+test "parseCliOptions returns default options when no flags are passed" {
+    const args = [_][:0]const u8{"ppr"};
+    const options = parseCliOptions(args[0..]);
+    try std.testing.expect(!options.draft);
+}
+
+test "parseCliOptions enables draft mode when --draft is passed" {
+    const args = [_][:0]const u8{ "ppr", "--draft" };
+    const options = parseCliOptions(args[0..]);
+    try std.testing.expect(options.draft);
+}
+
+test "parseCliOptions ignores unknown flags" {
+    const args = [_][:0]const u8{ "ppr", "--nope" };
+    const options = parseCliOptions(args[0..]);
+    try std.testing.expect(!options.draft);
 }
 
 test "normalizeCommaSeparated trims values and drops empties" {
