@@ -36,7 +36,9 @@ fn promptText(
         }
     };
 
-    var liveEditing = std.posix.isatty(std.posix.STDIN_FILENO);
+    var liveEditing = !builtin.is_test and
+        std.posix.isatty(std.posix.STDIN_FILENO) and
+        std.posix.isatty(std.posix.STDOUT_FILENO);
     var rawMode: ?RawTerminalMode = null;
 
     if (liveEditing) {
@@ -1307,49 +1309,63 @@ test "promptText supports CSI modifier forms for option and command navigation" 
 }
 
 test "promptText supports cmd opt and ctrl backspace equivalents" {
-    var cmdReader = std.Io.Reader.fixed("hello world\x15\n");
+    var cmdReader = std.Io.Reader.fixed("hello brave world\x1bb\x15\n");
     var cmdOutputBuffer: [128]u8 = undefined;
     var cmdWriter = std.Io.Writer.fixed(&cmdOutputBuffer);
     var cmdInputBuffer: [64]u8 = undefined;
     const cmdText = try promptText("Title: ", &cmdReader, &cmdWriter, &cmdInputBuffer);
-    try std.testing.expectEqualStrings("", cmdText);
+    try std.testing.expectEqualStrings("world", cmdText);
 
-    var optReader = std.Io.Reader.fixed("hello world\x1b\x7f\n");
+    var optReader = std.Io.Reader.fixed("hello brave world\x1b\x7f\n");
     var optOutputBuffer: [128]u8 = undefined;
     var optWriter = std.Io.Writer.fixed(&optOutputBuffer);
     var optInputBuffer: [64]u8 = undefined;
     const optText = try promptText("Title: ", &optReader, &optWriter, &optInputBuffer);
-    try std.testing.expectEqualStrings("hello ", optText);
+    try std.testing.expectEqualStrings("hello brave ", optText);
 
-    var ctrlReader = std.Io.Reader.fixed("hello world\x17\n");
+    var ctrlReader = std.Io.Reader.fixed("hello brave world\x17\n");
     var ctrlOutputBuffer: [128]u8 = undefined;
     var ctrlWriter = std.Io.Writer.fixed(&ctrlOutputBuffer);
     var ctrlInputBuffer: [64]u8 = undefined;
     const ctrlText = try promptText("Title: ", &ctrlReader, &ctrlWriter, &ctrlInputBuffer);
-    try std.testing.expectEqualStrings("hello ", ctrlText);
+    try std.testing.expectEqualStrings("hello brave ", ctrlText);
 }
 
 test "promptText supports CSI u backspace modifier forms" {
-    var optReader = std.Io.Reader.fixed("hello world\x1b[127;3u\n");
+    var optReader = std.Io.Reader.fixed("hello brave world\x1b[127;3u\n");
     var optOutputBuffer: [128]u8 = undefined;
     var optWriter = std.Io.Writer.fixed(&optOutputBuffer);
     var optInputBuffer: [64]u8 = undefined;
     const optText = try promptText("Title: ", &optReader, &optWriter, &optInputBuffer);
-    try std.testing.expectEqualStrings("hello ", optText);
+    try std.testing.expectEqualStrings("hello brave ", optText);
 
-    var ctrlReader = std.Io.Reader.fixed("hello world\x1b[127;5u\n");
+    var optBsReader = std.Io.Reader.fixed("hello brave world\x1b[8;3u\n");
+    var optBsOutputBuffer: [128]u8 = undefined;
+    var optBsWriter = std.Io.Writer.fixed(&optBsOutputBuffer);
+    var optBsInputBuffer: [64]u8 = undefined;
+    const optBsText = try promptText("Title: ", &optBsReader, &optBsWriter, &optBsInputBuffer);
+    try std.testing.expectEqualStrings("hello brave ", optBsText);
+
+    var ctrlReader = std.Io.Reader.fixed("hello brave world\x1b[127;5u\n");
     var ctrlOutputBuffer: [128]u8 = undefined;
     var ctrlWriter = std.Io.Writer.fixed(&ctrlOutputBuffer);
     var ctrlInputBuffer: [64]u8 = undefined;
     const ctrlText = try promptText("Title: ", &ctrlReader, &ctrlWriter, &ctrlInputBuffer);
-    try std.testing.expectEqualStrings("hello ", ctrlText);
+    try std.testing.expectEqualStrings("hello brave ", ctrlText);
 
-    var cmdReader = std.Io.Reader.fixed("hello world\x1b[127;9u\n");
+    var cmdReader = std.Io.Reader.fixed("hello brave world\x1bb\x1b[127;9u\n");
     var cmdOutputBuffer: [128]u8 = undefined;
     var cmdWriter = std.Io.Writer.fixed(&cmdOutputBuffer);
     var cmdInputBuffer: [64]u8 = undefined;
     const cmdText = try promptText("Title: ", &cmdReader, &cmdWriter, &cmdInputBuffer);
-    try std.testing.expectEqualStrings("", cmdText);
+    try std.testing.expectEqualStrings("world", cmdText);
+
+    var cmdBsReader = std.Io.Reader.fixed("hello world\x1b[8;9u\n");
+    var cmdBsOutputBuffer: [128]u8 = undefined;
+    var cmdBsWriter = std.Io.Writer.fixed(&cmdBsOutputBuffer);
+    var cmdBsInputBuffer: [64]u8 = undefined;
+    const cmdBsText = try promptText("Title: ", &cmdBsReader, &cmdBsWriter, &cmdBsInputBuffer);
+    try std.testing.expectEqualStrings("", cmdBsText);
 }
 
 test "promptEditor returns path and editor writes text to file" {
