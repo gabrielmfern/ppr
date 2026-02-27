@@ -561,32 +561,50 @@ fn pickMultiple(
             selected: []const bool,
             cursor: usize,
             selectedCount: usize,
-            rerender: bool,
+            previousLines: *usize,
         ) !void {
-            const lines = items.len + 2;
-            if (rerender and lines > 0) {
-                try w.print("\x1b[{d}A\r", .{lines});
+            if (previousLines.* > 0) {
+                try w.print("\x1b[{d}A\r", .{previousLines.*});
             }
             try w.writeAll("\x1b[J");
             try w.writeAll("Reviewers (up/down to move, space to toggle, enter to confirm)\n");
-            for (items, 0..) |item, idx| {
+
+            const windowSize: usize = 5;
+            var start: usize = 0;
+            if (items.len > windowSize) {
+                const halfWindow = windowSize / 2;
+                if (cursor > halfWindow) {
+                    start = cursor - halfWindow;
+                }
+                const maxStart = items.len - windowSize;
+                if (start > maxStart) {
+                    start = maxStart;
+                }
+            }
+            const end = @min(items.len, start + windowSize);
+
+            var linesRendered: usize = 1;
+            for (start..end) |idx| {
+                const item = items[idx];
                 const indicator = if (idx == cursor) ">" else " ";
                 const marker = if (selected[idx]) "x" else " ";
                 try w.print("{s} [{s}] {s}\x1b[K\n", .{ indicator, marker, item });
+                linesRendered += 1;
             }
             try w.print("Selected: {d}\x1b[K\n", .{selectedCount});
+            linesRendered += 1;
             try w.flush();
+            previousLines.* = linesRendered;
         }
     }.call;
 
     var selectedFlags = std.mem.zeroes([maxOptions]bool);
     var selectedCount: usize = 0;
     var cursor: usize = 0;
-    var rendered = false;
+    var renderedLines: usize = 0;
 
     if (liveSelection) {
-        try renderPicker(writer, options, selectedFlags[0..options.len], cursor, selectedCount, false);
-        rendered = true;
+        try renderPicker(writer, options, selectedFlags[0..options.len], cursor, selectedCount, &renderedLines);
     }
 
     while (true) {
@@ -665,8 +683,7 @@ fn pickMultiple(
 
         if (submitted) break;
         if (liveSelection and changed) {
-            try renderPicker(writer, options, selectedFlags[0..options.len], cursor, selectedCount, rendered);
-            rendered = true;
+            try renderPicker(writer, options, selectedFlags[0..options.len], cursor, selectedCount, &renderedLines);
         }
     }
 
