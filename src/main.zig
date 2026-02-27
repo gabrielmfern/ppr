@@ -113,6 +113,14 @@ fn promptText(
                 deletePromptByteBeforeCursor(outputBuffer, &textLen, &cursor);
                 shouldRender = true;
             },
+            0x15 => {
+                deletePromptToStart(outputBuffer, &textLen, &cursor); // Ctrl+U / Cmd+Backspace equivalent
+                shouldRender = true;
+            },
+            0x17 => {
+                deletePromptWordBeforeCursor(outputBuffer, &textLen, &cursor); // Ctrl+W / Ctrl+Backspace equivalent
+                shouldRender = true;
+            },
             0x1b => {
                 const action = try readPromptEscapeAction(reader);
                 switch (action) {
@@ -149,6 +157,14 @@ fn promptText(
                         moveCursorWordRight(outputBuffer[0..textLen], &cursor);
                         shouldRender = true;
                     },
+                    .delete_word_left => {
+                        deletePromptWordBeforeCursor(outputBuffer, &textLen, &cursor);
+                        shouldRender = true;
+                    },
+                    .delete_to_start => {
+                        deletePromptToStart(outputBuffer, &textLen, &cursor);
+                        shouldRender = true;
+                    },
                 }
             },
             else => {
@@ -174,6 +190,8 @@ const PromptEscapeAction = enum {
     move_end,
     move_word_left,
     move_word_right,
+    delete_word_left,
+    delete_to_start,
 };
 
 const CsiParameters = struct {
@@ -203,6 +221,35 @@ fn deletePromptByteBeforeCursor(outputBuffer: []u8, textLen: *usize, cursor: *us
     }
     cursor.* -= 1;
     textLen.* -= 1;
+}
+
+fn deletePromptWordBeforeCursor(outputBuffer: []u8, textLen: *usize, cursor: *usize) void {
+    if (cursor.* == 0) return;
+
+    var start = cursor.*;
+    while (start > 0 and std.ascii.isWhitespace(outputBuffer[start - 1])) {
+        start -= 1;
+    }
+    while (start > 0 and !std.ascii.isWhitespace(outputBuffer[start - 1])) {
+        start -= 1;
+    }
+
+    const tailLen = textLen.* - cursor.*;
+    if (tailLen > 0) {
+        @memmove(outputBuffer[start .. start + tailLen], outputBuffer[cursor.* .. cursor.* + tailLen]);
+    }
+    textLen.* -= cursor.* - start;
+    cursor.* = start;
+}
+
+fn deletePromptToStart(outputBuffer: []u8, textLen: *usize, cursor: *usize) void {
+    if (cursor.* == 0) return;
+    const tailLen = textLen.* - cursor.*;
+    if (tailLen > 0) {
+        @memmove(outputBuffer[0..tailLen], outputBuffer[cursor.* .. cursor.* + tailLen]);
+    }
+    textLen.* = tailLen;
+    cursor.* = 0;
 }
 
 fn moveCursorWordLeft(text: []const u8, cursor: *usize) void {
@@ -235,6 +282,7 @@ fn readPromptEscapeAction(reader: *std.Io.Reader) !PromptEscapeAction {
         'O' => return readSs3EscapeAction(reader),
         'b' => return .move_word_left, // Option+Left in many macOS terminal configs.
         'f' => return .move_word_right, // Option+Right in many macOS terminal configs.
+        0x08, 0x7f => return .delete_word_left, // Option+Backspace (ESC + BS/DEL)
         else => return .none,
     }
 }
@@ -288,6 +336,7 @@ fn classifyCsiEscapeAction(sequence: []const u8) PromptEscapeAction {
         'H' => .move_home,
         'F' => .move_end,
         '~' => classifyTildeEscape(paramsText),
+        'u' => classifyUnicodeKeyEscape(paramsText),
         else => .none,
     };
 }
@@ -320,6 +369,18 @@ fn classifyTildeEscape(paramsText: []const u8) PromptEscapeAction {
         4, 8 => .move_end,
         else => .none,
     };
+}
+
+fn classifyUnicodeKeyEscape(paramsText: []const u8) PromptEscapeAction {
+    const params = parseCsiParameters(paramsText) orelse return .none;
+    const codepoint = params.first orelse return .none;
+    const modifier = params.second orelse return .none;
+
+    if (codepoint != 8 and codepoint != 127) return .none;
+
+    if (modifier == 9) return .delete_to_start; // Cmd+Backspace in Kitty-style keyboard protocol.
+    if (modifier == 3 or modifier == 5) return .delete_word_left; // Opt/Ctrl+Backspace.
+    return .none;
 }
 
 fn parseCsiParameters(text: []const u8) ?CsiParameters {
@@ -1243,6 +1304,52 @@ test "promptText supports CSI modifier forms for option and command navigation" 
     var secondInputBuffer: [64]u8 = undefined;
     const secondText = try promptText("Title: ", &secondReader, &secondWriter, &secondInputBuffer);
     try std.testing.expectEqualStrings("START-abc-END", secondText);
+}
+
+test "promptText supports cmd opt and ctrl backspace equivalents" {
+    var cmdReader = std.Io.Reader.fixed("hello world\x15\n");
+    var cmdOutputBuffer: [128]u8 = undefined;
+    var cmdWriter = std.Io.Writer.fixed(&cmdOutputBuffer);
+    var cmdInputBuffer: [64]u8 = undefined;
+    const cmdText = try promptText("Title: ", &cmdReader, &cmdWriter, &cmdInputBuffer);
+    try std.testing.expectEqualStrings("", cmdText);
+
+    var optReader = std.Io.Reader.fixed("hello world\x1b\x7f\n");
+    var optOutputBuffer: [128]u8 = undefined;
+    var optWriter = std.Io.Writer.fixed(&optOutputBuffer);
+    var optInputBuffer: [64]u8 = undefined;
+    const optText = try promptText("Title: ", &optReader, &optWriter, &optInputBuffer);
+    try std.testing.expectEqualStrings("hello ", optText);
+
+    var ctrlReader = std.Io.Reader.fixed("hello world\x17\n");
+    var ctrlOutputBuffer: [128]u8 = undefined;
+    var ctrlWriter = std.Io.Writer.fixed(&ctrlOutputBuffer);
+    var ctrlInputBuffer: [64]u8 = undefined;
+    const ctrlText = try promptText("Title: ", &ctrlReader, &ctrlWriter, &ctrlInputBuffer);
+    try std.testing.expectEqualStrings("hello ", ctrlText);
+}
+
+test "promptText supports CSI u backspace modifier forms" {
+    var optReader = std.Io.Reader.fixed("hello world\x1b[127;3u\n");
+    var optOutputBuffer: [128]u8 = undefined;
+    var optWriter = std.Io.Writer.fixed(&optOutputBuffer);
+    var optInputBuffer: [64]u8 = undefined;
+    const optText = try promptText("Title: ", &optReader, &optWriter, &optInputBuffer);
+    try std.testing.expectEqualStrings("hello ", optText);
+
+    var ctrlReader = std.Io.Reader.fixed("hello world\x1b[127;5u\n");
+    var ctrlOutputBuffer: [128]u8 = undefined;
+    var ctrlWriter = std.Io.Writer.fixed(&ctrlOutputBuffer);
+    var ctrlInputBuffer: [64]u8 = undefined;
+    const ctrlText = try promptText("Title: ", &ctrlReader, &ctrlWriter, &ctrlInputBuffer);
+    try std.testing.expectEqualStrings("hello ", ctrlText);
+
+    var cmdReader = std.Io.Reader.fixed("hello world\x1b[127;9u\n");
+    var cmdOutputBuffer: [128]u8 = undefined;
+    var cmdWriter = std.Io.Writer.fixed(&cmdOutputBuffer);
+    var cmdInputBuffer: [64]u8 = undefined;
+    const cmdText = try promptText("Title: ", &cmdReader, &cmdWriter, &cmdInputBuffer);
+    try std.testing.expectEqualStrings("", cmdText);
 }
 
 test "promptEditor returns path and editor writes text to file" {
