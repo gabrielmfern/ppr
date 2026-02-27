@@ -72,52 +72,73 @@ fn normalizeCommaSeparated(input: []const u8, output_buffer: []u8) ![]u8 {
 }
 
 const Config = struct {
-    allocator: std.mem.Allocator,
-    name: []u8,
-    path: []u8,
-    reviewerGithubToSlack: std.StringArrayHashMap([]u8),
+    name_storage: [max_name_len]u8,
+    name_len: usize,
+    path_storage: [max_path_len]u8,
+    path_len: usize,
+    entries: [max_entries]Entry,
+    entries_len: usize,
     created: bool,
 
-    const max_file_size = 1024 * 1024;
+    const max_name_len = 64;
+    const max_path_len = 1024;
+    const max_entries = 256;
+    const max_handle_len = 128;
+    const max_file_size = 64 * 1024;
+
+    const Entry = struct {
+        github_storage: [max_handle_len]u8,
+        github_len: usize,
+        slack_storage: [max_handle_len]u8,
+        slack_len: usize,
+
+        fn github(self: *const Entry) []const u8 {
+            return self.github_storage[0..self.github_len];
+        }
+
+        fn slack(self: *const Entry) []const u8 {
+            return self.slack_storage[0..self.slack_len];
+        }
+    };
 
     pub fn init(
-        allocator: std.mem.Allocator,
         name: []const u8,
         github_reviewers: []const u8,
     ) !Config {
-        const home = try std.process.getEnvVarOwned(allocator, "HOME");
-        defer allocator.free(home);
-        return initWithHome(allocator, name, home, github_reviewers);
+        if (builtin.os.tag == .windows) return error.UnsupportedOperatingSystem;
+        const home = std.posix.getenv("HOME") orelse return error.EnvironmentVariableNotFound;
+        return initWithHome(name, home, github_reviewers);
     }
 
     fn initWithHome(
-        allocator: std.mem.Allocator,
         name: []const u8,
         home: []const u8,
         github_reviewers: []const u8,
     ) !Config {
-        const config_dir = try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
-        defer allocator.free(config_dir);
+        var config_dir_storage: [max_path_len]u8 = undefined;
+        const config_dir = try std.fmt.bufPrint(&config_dir_storage, "{s}/.config", .{home});
 
         std.fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ config_dir, name });
-        errdefer allocator.free(path);
-
         var config = Config{
-            .allocator = allocator,
-            .name = try allocator.dupe(u8, name),
-            .path = path,
-            .reviewerGithubToSlack = std.StringArrayHashMap([]u8).init(allocator),
+            .name_storage = undefined,
+            .name_len = 0,
+            .path_storage = undefined,
+            .path_len = 0,
+            .entries = undefined,
+            .entries_len = 0,
             .created = false,
         };
-        errdefer config.deinit();
+
+        config.name_len = try copyInto(config.name_storage[0..], name);
+        const config_path = try std.fmt.bufPrint(&config.path_storage, "{s}/{s}.json", .{ config_dir, name });
+        config.path_len = config_path.len;
 
         const exists = blk: {
-            std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+            std.fs.accessAbsolute(config.path(), .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk false,
                 else => return err,
             };
@@ -136,25 +157,37 @@ const Config = struct {
     }
 
     pub fn deinit(self: *Config) void {
-        var it = self.reviewerGithubToSlack.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
+        _ = self;
+    }
+
+    pub fn path(self: *const Config) []const u8 {
+        return self.path_storage[0..self.path_len];
+    }
+
+    pub fn getSlackHandle(self: *const Config, github_handle: []const u8) ?[]const u8 {
+        for (self.entries[0..self.entries_len]) |*entry| {
+            if (std.mem.eql(u8, entry.github(), github_handle)) {
+                return entry.slack();
+            }
         }
-        self.reviewerGithubToSlack.deinit();
-        self.allocator.free(self.name);
-        self.allocator.free(self.path);
-        self.* = undefined;
+        return null;
+    }
+
+    fn copyInto(storage: []u8, value: []const u8) !usize {
+        if (value.len > storage.len) return error.StreamTooLong;
+        @memcpy(storage[0..value.len], value);
+        return value.len;
     }
 
     fn putMapping(self: *Config, github_handle: []const u8, slack_handle: []const u8) !void {
-        if (self.reviewerGithubToSlack.get(github_handle) != null) return;
+        if (github_handle.len == 0 or slack_handle.len == 0) return;
+        if (self.getSlackHandle(github_handle) != null) return;
+        if (self.entries_len >= max_entries) return error.StreamTooLong;
 
-        const github_copy = try self.allocator.dupe(u8, github_handle);
-        errdefer self.allocator.free(github_copy);
-        const slack_copy = try self.allocator.dupe(u8, slack_handle);
-        errdefer self.allocator.free(slack_copy);
-        try self.reviewerGithubToSlack.put(github_copy, slack_copy);
+        var entry = &self.entries[self.entries_len];
+        entry.github_len = try copyInto(entry.github_storage[0..], github_handle);
+        entry.slack_len = try copyInto(entry.slack_storage[0..], slack_handle);
+        self.entries_len += 1;
     }
 
     fn seedDefaults(self: *Config, github_reviewers: []const u8) !void {
@@ -167,52 +200,132 @@ const Config = struct {
     }
 
     fn load(self: *Config) !void {
-        var file = try std.fs.openFileAbsolute(self.path, .{});
+        self.entries_len = 0;
+
+        var file = try std.fs.openFileAbsolute(self.path(), .{});
         defer file.close();
 
-        const json_text = try file.readToEndAlloc(self.allocator, max_file_size);
-        defer self.allocator.free(json_text);
+        var json_text_buffer: [max_file_size]u8 = undefined;
+        const n = try file.readAll(&json_text_buffer);
+        var extra: [1]u8 = undefined;
+        if (try file.read(&extra) != 0) return error.StreamTooLong;
+        const json_text = json_text_buffer[0..n];
+
         const trimmed = std.mem.trim(u8, json_text, &std.ascii.whitespace);
         if (trimmed.len == 0) return;
 
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, json_text, .{}) catch {
-            return error.InvalidConfig;
-        };
-        defer parsed.deinit();
-
-        if (parsed.value != .object) return error.InvalidConfig;
-        var it = parsed.value.object.iterator();
-        while (it.next()) |entry| {
-            const slack_handle = switch (entry.value_ptr.*) {
-                .string => |text| text,
-                else => return error.InvalidConfig,
-            };
-            try self.putMapping(entry.key_ptr.*, slack_handle);
-        }
+        try self.parseJsonMap(trimmed);
     }
 
     fn save(self: *const Config) !void {
-        var file = try std.fs.createFileAbsolute(self.path, .{
+        var file = try std.fs.createFileAbsolute(self.path(), .{
             .truncate = true,
         });
         defer file.close();
 
         var write_buffer: [4096]u8 = undefined;
         var file_writer = file.writer(&write_buffer);
-        var json_writer: std.json.Stringify = .{
-            .writer = &file_writer.interface,
-            .options = .{ .whitespace = .indent_2 },
-        };
+        const writer = &file_writer.interface;
 
-        try json_writer.beginObject();
-        var it = self.reviewerGithubToSlack.iterator();
-        while (it.next()) |entry| {
-            try json_writer.objectField(entry.key_ptr.*);
-            try json_writer.write(entry.value_ptr.*);
+        try writer.writeAll("{");
+        for (self.entries[0..self.entries_len], 0..) |*entry, i| {
+            if (i == 0) {
+                try writer.writeAll("\n");
+            } else {
+                try writer.writeAll(",\n");
+            }
+            try writer.writeAll("  ");
+            try writeJsonString(writer, entry.github());
+            try writer.writeAll(": ");
+            try writeJsonString(writer, entry.slack());
         }
-        try json_writer.endObject();
-        try file_writer.interface.writeAll("\n");
+        if (self.entries_len != 0) {
+            try writer.writeAll("\n");
+        }
+        try writer.writeAll("}\n");
         try file_writer.interface.flush();
+    }
+
+    fn skipWhitespace(json_text: []const u8, index: *usize) void {
+        while (index.* < json_text.len and std.ascii.isWhitespace(json_text[index.*])) : (index.* += 1) {}
+    }
+
+    fn parseJsonString(json_text: []const u8, index: *usize) ![]const u8 {
+        if (index.* >= json_text.len or json_text[index.*] != '"') return error.InvalidConfig;
+        index.* += 1;
+        const start = index.*;
+
+        while (index.* < json_text.len) : (index.* += 1) {
+            const ch = json_text[index.*];
+            if (ch == '"') {
+                const value = json_text[start..index.*];
+                index.* += 1;
+                return value;
+            }
+            if (ch == '\\' or ch < 0x20) return error.InvalidConfig;
+        }
+
+        return error.InvalidConfig;
+    }
+
+    fn parseJsonMap(self: *Config, json_text: []const u8) !void {
+        var index: usize = 0;
+        skipWhitespace(json_text, &index);
+        if (index >= json_text.len or json_text[index] != '{') return error.InvalidConfig;
+        index += 1;
+
+        skipWhitespace(json_text, &index);
+        if (index < json_text.len and json_text[index] == '}') {
+            index += 1;
+            skipWhitespace(json_text, &index);
+            if (index != json_text.len) return error.InvalidConfig;
+            return;
+        }
+
+        while (true) {
+            const github_handle = try parseJsonString(json_text, &index);
+            skipWhitespace(json_text, &index);
+            if (index >= json_text.len or json_text[index] != ':') return error.InvalidConfig;
+            index += 1;
+            skipWhitespace(json_text, &index);
+            const slack_handle = try parseJsonString(json_text, &index);
+            try self.putMapping(github_handle, slack_handle);
+            skipWhitespace(json_text, &index);
+            if (index >= json_text.len) return error.InvalidConfig;
+
+            const ch = json_text[index];
+            if (ch == ',') {
+                index += 1;
+                skipWhitespace(json_text, &index);
+                continue;
+            }
+            if (ch == '}') {
+                index += 1;
+                break;
+            }
+            return error.InvalidConfig;
+        }
+
+        skipWhitespace(json_text, &index);
+        if (index != json_text.len) return error.InvalidConfig;
+    }
+
+    fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
+        try writer.writeAll("\"");
+        for (value) |ch| {
+            switch (ch) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => {
+                    if (ch < 0x20) return error.InvalidConfig;
+                    try writer.writeByte(ch);
+                },
+            }
+        }
+        try writer.writeAll("\"");
     }
 };
 
@@ -441,7 +554,7 @@ fn generateSlackMessage(
     var reviewerMentionBuffer: [1024]u8 = undefined;
     var reviewerMentions = std.ArrayList(u8).initBuffer(&reviewerMentionBuffer);
     for (reviewers, 0..) |githubHandle, i| {
-        if (config.reviewerGithubToSlack.get(githubHandle)) |slackHandle| {
+        if (config.getSlackHandle(githubHandle)) |slackHandle| {
             reviewerMentions.appendSliceAssumeCapacity("@");
             reviewerMentions.appendSliceAssumeCapacity(slackHandle);
         } else {
@@ -607,10 +720,10 @@ pub fn main() !void {
     else
         "";
 
-    var config = try Config.init(allocator, "ppr", collaboratorsList);
+    var config = try Config.init("ppr", collaboratorsList);
     defer config.deinit();
     if (config.created) {
-        try writer.print("Created config file: {s}\n", .{config.path});
+        try writer.print("Created config file: {s}\n", .{config.path()});
         try writer.flush();
     }
 
@@ -784,46 +897,45 @@ test "Config init creates file and defaults github handles to themselves" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(home);
+    var home_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_storage);
 
-    var config = try Config.initWithHome(std.testing.allocator, "ppr-test", home, "alice\nbob\n");
+    var config = try Config.initWithHome("ppr-test", home, "alice\nbob\n");
     defer config.deinit();
 
     try std.testing.expect(config.created);
-    try std.testing.expectEqualStrings("alice", config.reviewerGithubToSlack.get("alice").?);
-    try std.testing.expectEqualStrings("bob", config.reviewerGithubToSlack.get("bob").?);
+    try std.testing.expectEqualStrings("alice", config.getSlackHandle("alice").?);
+    try std.testing.expectEqualStrings("bob", config.getSlackHandle("bob").?);
 
-    const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/.config/ppr-test.json", .{home});
-    defer std.testing.allocator.free(config_path);
+    var config_path_storage: [1024]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&config_path_storage, "{s}/.config/ppr-test.json", .{home});
 
     var file = try std.fs.openFileAbsolute(config_path, .{});
     defer file.close();
 
-    const json_text = try file.readToEndAlloc(std.testing.allocator, 4096);
-    defer std.testing.allocator.free(json_text);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_text, .{});
-    defer parsed.deinit();
-
-    try std.testing.expect(parsed.value == .object);
-    try std.testing.expectEqualStrings("alice", parsed.value.object.get("alice").?.string);
-    try std.testing.expectEqualStrings("bob", parsed.value.object.get("bob").?.string);
+    var json_text_buffer: [4096]u8 = undefined;
+    const n = try file.readAll(&json_text_buffer);
+    const json_text = json_text_buffer[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, json_text, "\"alice\": \"alice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_text, "\"bob\": \"bob\"") != null);
 }
 
 test "Config init loads existing reviewer to slack map" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(home);
+    var home_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_storage);
 
-    const config_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}/.config", .{home});
-    defer std.testing.allocator.free(config_dir);
-    try std.fs.makeDirAbsolute(config_dir);
+    var config_dir_storage: [1024]u8 = undefined;
+    const config_dir = try std.fmt.bufPrint(&config_dir_storage, "{s}/.config", .{home});
+    std.fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
 
-    const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/ppr-test.json", .{config_dir});
-    defer std.testing.allocator.free(config_path);
+    var config_path_storage: [1024]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&config_path_storage, "{s}/ppr-test.json", .{config_dir});
 
     var file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
     defer file.close();
@@ -834,22 +946,22 @@ test "Config init loads existing reviewer to slack map" {
         \\
     );
 
-    var config = try Config.initWithHome(std.testing.allocator, "ppr-test", home, "alice\nbob\n");
+    var config = try Config.initWithHome("ppr-test", home, "alice\nbob\n");
     defer config.deinit();
 
     try std.testing.expect(!config.created);
-    try std.testing.expectEqualStrings("@alice-in-slack", config.reviewerGithubToSlack.get("alice").?);
-    try std.testing.expect(config.reviewerGithubToSlack.get("bob") == null);
+    try std.testing.expectEqualStrings("@alice-in-slack", config.getSlackHandle("alice").?);
+    try std.testing.expect(config.getSlackHandle("bob") == null);
 }
 
 test "generateSlackMessage uses slack map and falls back to github handle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(home);
+    var home_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_storage);
 
-    var config = try Config.initWithHome(std.testing.allocator, "ppr-test-slack-message", home, "");
+    var config = try Config.initWithHome("ppr-test-slack-message", home, "");
     defer config.deinit();
     try config.putMapping("alice", "alice.slack");
 
