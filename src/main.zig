@@ -1398,7 +1398,10 @@ pub fn main() !void {
     const reviewerChoices = reviewerChoicesBuffer[0..reviewerChoicesLen];
 
     var selectedReviewersBuffer: [512][]const u8 = undefined;
-    const selectedReviewers = try pickMultiple(reviewerChoices, reader, writer, &selectedReviewersBuffer);
+    const selectedReviewers = if (reviewerChoices.len == 0)
+        selectedReviewersBuffer[0..0]
+    else
+        try pickMultiple(reviewerChoices, reader, writer, &selectedReviewersBuffer);
 
     var reviewersCsvBuffer: [2048]u8 = undefined;
     const reviewersCsv = try joinCommaSeparatedSlices(selectedReviewers, &reviewersCsvBuffer);
