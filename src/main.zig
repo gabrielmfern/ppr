@@ -411,17 +411,17 @@ pub fn main() !void {
         return error.SafetyCheckFailed;
     }
 
-    var commitRangeCommandBuffer: [256]u8 = undefined;
+    var commitRangeCommandBuffer: [384]u8 = undefined;
     const commitRangeCommand = try std.fmt.bufPrint(
         &commitRangeCommandBuffer,
-        "git log --oneline 'origin/{s}..HEAD'",
-        .{base},
+        "git log --oneline 'origin/{s}..origin/{s}'",
+        .{ base, headBranch },
     );
     const commitRangeResult = try shell.runCommand(commitRangeCommand, &outputBuffer);
     if (commitRangeResult.exitCode != 0) return error.SafetyCheckFailed;
     std.log.debug("commit range {s}", .{commitRangeResult.output});
     if (std.mem.trim(u8, commitRangeResult.output, " ").len == 0) {
-        try writer.print("There are no commits that this branch ({s}) has and the base doesn't ({s})\n", .{ headBranch, base });
+        try writer.print("There are no commits on origin/{s} that are not in origin/{s}\n", .{ headBranch, base });
         try writer.flush();
         return error.SafetyCheckFailed;
     }
