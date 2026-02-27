@@ -242,12 +242,12 @@ const GitHub = struct {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) {
-        std.log.err("Memory leak detected");
+        std.log.err("Memory leak detected", .{});
     };
 
     const allocator = gpa.allocator();
 
-    const github = try GitHub.init(allocator);
+    var github = try GitHub.init(allocator);
     defer github.deinit();
 
     var stdin_buffer: [1024]u8 = undefined;
@@ -261,7 +261,7 @@ pub fn main() !void {
     var titleBuffer: [512]u8 = undefined;
     const title = try promptText("Title: ", reader, writer, &titleBuffer);
     if (std.mem.trim(u8, title, " ").len == 0) {
-        std.log.info("Title is empty, exiting");
+        std.debug.print("Title is empty, exiting\n", .{});
         return;
     }
 
