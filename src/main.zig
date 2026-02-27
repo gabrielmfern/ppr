@@ -36,13 +36,6 @@ fn promptYesNo(
     return std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes");
 }
 
-fn copyTrimmed(input: []const u8, output_buffer: []u8) ![]u8 {
-    const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
-    if (trimmed.len > output_buffer.len) return error.StreamTooLong;
-    @memcpy(output_buffer[0..trimmed.len], trimmed);
-    return output_buffer[0..trimmed.len];
-}
-
 fn worktreeIsClean(status_sb_output: []const u8) bool {
     var lines = std.mem.tokenizeScalar(u8, status_sb_output, '\n');
     _ = lines.next() orelse return false;
@@ -115,7 +108,7 @@ const Shell = struct {
 
     const CommandResult = struct {
         output: []u8,
-        exit_code: u8,
+        exitCode: u8,
     };
 
     const MarkerParse = struct {
@@ -173,7 +166,7 @@ const Shell = struct {
                 self.consumeStdout(marker_parse.consumed_end);
                 return .{
                     .output = output_buffer[0..output.len],
-                    .exit_code = marker_parse.exit_code,
+                    .exitCode = marker_parse.exit_code,
                 };
             }
 
@@ -259,8 +252,8 @@ fn runCommandExpectSuccess(
     check_name: []const u8,
 ) !Shell.CommandResult {
     const result = try shell.runCommand(command, output_buffer);
-    if (result.exit_code != 0) {
-        std.log.err("Safety check failed: {s} (exit code {d})", .{ check_name, result.exit_code });
+    if (result.exitCode != 0) {
+        std.log.err("Safety check failed: {s} (exit code {d})", .{ check_name, result.exitCode });
         const err_output = std.mem.trim(u8, result.output, &std.ascii.whitespace);
         if (err_output.len != 0) {
             std.log.err("{s}", .{err_output});
@@ -268,81 +261,6 @@ fn runCommandExpectSuccess(
         return error.SafetyCheckFailed;
     }
     return result;
-}
-
-fn runSafetyChecks(shell: *Shell, writer: *std.Io.Writer) !void {
-    var output_buffer: [32 * 1024]u8 = undefined;
-
-    _ = try runCommandExpectSuccess(
-        shell,
-        "gh auth status",
-        &output_buffer,
-        "gh auth status",
-    );
-
-    const base_result = try runCommandExpectSuccess(
-        shell,
-        "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
-        &output_buffer,
-        "gh repo view --json defaultBranchRef",
-    );
-    var base_storage: [128]u8 = undefined;
-    const base = try copyTrimmed(base_result.output, &base_storage);
-    if (base.len == 0) return error.SafetyCheckFailed;
-
-    const branch_result = try runCommandExpectSuccess(
-        shell,
-        "git rev-parse --abbrev-ref HEAD",
-        &output_buffer,
-        "git rev-parse --abbrev-ref HEAD",
-    );
-    var branch_storage: [128]u8 = undefined;
-    const branch = try copyTrimmed(branch_result.output, &branch_storage);
-    if (branch.len == 0 or std.mem.eql(u8, branch, "HEAD")) return error.DetachedHead;
-
-    const status_result = try runCommandExpectSuccess(
-        shell,
-        "git status -sb",
-        &output_buffer,
-        "git status -sb",
-    );
-    if (!worktreeIsClean(status_result.output)) return error.WorktreeNotClean;
-
-    var existing_pr_cmd_storage: [512]u8 = undefined;
-    const existing_pr_cmd = try std.fmt.bufPrint(
-        &existing_pr_cmd_storage,
-        "gh pr list --head '{s}' --base '{s}' --state open --json url --jq '.[0].url // \"\"'",
-        .{ branch, base },
-    );
-    const existing_pr_result = try runCommandExpectSuccess(
-        shell,
-        existing_pr_cmd,
-        &output_buffer,
-        "gh pr list --head <branch> --base <base> --state open",
-    );
-    var existing_pr_storage: [512]u8 = undefined;
-    const existing_pr_url = try copyTrimmed(existing_pr_result.output, &existing_pr_storage);
-    if (existing_pr_url.len != 0) {
-        try writer.print("An open PR already exists: {s}\n", .{existing_pr_url});
-        try writer.flush();
-        return error.OpenPullRequestAlreadyExists;
-    }
-
-    var commit_range_cmd_storage: [256]u8 = undefined;
-    const commit_range_cmd = try std.fmt.bufPrint(
-        &commit_range_cmd_storage,
-        "git log --oneline 'origin/{s}..HEAD'",
-        .{base},
-    );
-    const commit_range_result = try runCommandExpectSuccess(
-        shell,
-        commit_range_cmd,
-        &output_buffer,
-        "git log --oneline origin/<base>..HEAD",
-    );
-    if (std.mem.trim(u8, commit_range_result.output, &std.ascii.whitespace).len == 0) {
-        return error.NoCommitsToPullRequest;
-    }
 }
 
 pub fn main() !void {
@@ -364,12 +282,72 @@ pub fn main() !void {
     const reader = &stdin.interface;
     const writer = &stdout.interface;
 
-    try runSafetyChecks(&shell, writer);
+    var outputBuffer: [32 * 1024]u8 = undefined;
+
+    const ghAuthStatus = try shell.runCommand("gh auth status", &outputBuffer);
+    if (ghAuthStatus.exitCode != 0) {
+        try writer.print("You might not be logged in with `gh`. Run `gh auth login`\n", .{});
+        try writer.flush();
+        return error.SafetyCheckFailed;
+    }
+
+    const baseBranchResult = try shell.runCommand(
+        "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
+        &outputBuffer,
+    );
+    const base = std.mem.trim(u8, baseBranchResult.output, " ");
+    if (base.len == 0) {
+        try writer.print("Could not determine repository's default branch\n", .{});
+        try writer.flush();
+        return error.SafetyCheckFailed;
+    }
+
+    const headBranchNameResult = try shell.runCommand("git rev-parse --abbrev-ref HEAD", &outputBuffer);
+    if (headBranchNameResult.exitCode != 0) {
+        try writer.print("Could not determine current git branch\n", .{});
+        try writer.flush();
+        return error.SafetyCheckFailed;
+    }
+    const headBranch = std.mem.trim(u8, headBranchNameResult.output, " ");
+    if (headBranch.len == 0 or std.mem.eql(u8, headBranch, "HEAD")) {
+        try writer.print("HEAD is deatched, which means you're not checked out to a branch\n", .{});
+        try writer.flush();
+        return error.SafetyCheckFailed;
+    }
+
+    const worktreeStatusResult = try shell.runCommand("git status -s", &outputBuffer);
+    if (!worktreeIsClean(worktreeStatusResult.output)) return error.WorktreeNotClean;
+
+    var existingPrCommandBuffer: [512]u8 = undefined;
+    const existingPrCommand = try std.fmt.bufPrint(
+        &existingPrCommandBuffer,
+        "gh pr list --head '{s}' --base '{s}' --state open --json url --jq '.[0].url // \"\"'",
+        .{ ghAuthStatus, base },
+    );
+    const existingPrResult = try shell.runCommand(existingPrCommand, &outputBuffer);
+    const existingPrUrl = std.mem.trim(u8, existingPrResult.output, " ");
+    if (existingPrUrl.len != 0) {
+        try writer.print("An open PR already exists: {s}\n", .{existingPrUrl});
+        try writer.flush();
+        return error.SafetyCheckFailed;
+    }
+
+    var commitRangeCommandBuffer: [256]u8 = undefined;
+    const commitRangeCommand = try std.fmt.bufPrint(
+        &commitRangeCommandBuffer,
+        "git log --oneline 'origin/{s}..HEAD'",
+        .{base},
+    );
+    const commitRangeResult = try shell.runCommand(commitRangeCommand, &outputBuffer);
+    if (std.mem.trim(u8, commitRangeResult.output, " ").len == 0) {
+        return error.SafetyCheckFailed;
+    }
 
     var titleBuffer: [512]u8 = undefined;
     const title = try promptText("Title: ", reader, writer, &titleBuffer);
     if (std.mem.trim(u8, title, " ").len == 0) {
-        std.debug.print("Title is empty, exiting\n", .{});
+        try writer.print("No title given, cancelling pull request", .{});
+        try writer.flush();
         return;
     }
 
@@ -387,12 +365,12 @@ test "Shell keeps child shell alive between commands" {
 
     var first_output_buffer: [64]u8 = undefined;
     const first = try shell.runCommand("keep_alive_var=42", &first_output_buffer);
-    try std.testing.expectEqual(@as(u8, 0), first.exit_code);
+    try std.testing.expectEqual(@as(u8, 0), first.exitCode);
     try std.testing.expectEqualStrings("", first.output);
 
     var second_output_buffer: [64]u8 = undefined;
     const second = try shell.runCommand("echo \"$keep_alive_var\"", &second_output_buffer);
-    try std.testing.expectEqual(@as(u8, 0), second.exit_code);
+    try std.testing.expectEqual(@as(u8, 0), second.exitCode);
     try std.testing.expectEqualStrings("42\n", second.output);
 }
 
@@ -483,12 +461,6 @@ test "promptYesNo returns false for invalid answer" {
     const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
     try std.testing.expect(!accepted);
     try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
-}
-
-test "copyTrimmed trims and copies into fixed buffer" {
-    var out: [16]u8 = undefined;
-    const copied = try copyTrimmed("  abc \n", &out);
-    try std.testing.expectEqualStrings("abc", copied);
 }
 
 test "worktreeIsClean returns true when status has only branch line" {
