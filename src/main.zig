@@ -89,7 +89,7 @@ fn createTempEditorFile(path_storage: []u8) ![]u8 {
     return error.UnableToCreateTempFile;
 }
 
-const GitHub = struct {
+const Shell = struct {
     child: std.process.Child,
     stdout_buffer: [stdout_buffer_size]u8,
     stdout_len: usize,
@@ -111,7 +111,7 @@ const GitHub = struct {
         exit_code: u8,
     };
 
-    pub fn init(allocator: std.mem.Allocator) !GitHub {
+    pub fn init(allocator: std.mem.Allocator) !Shell {
         if (builtin.os.tag == .windows) return error.UnsupportedOperatingSystem;
 
         var child = std.process.Child.init(&.{"/bin/sh"}, allocator);
@@ -129,7 +129,7 @@ const GitHub = struct {
         };
     }
 
-    pub fn deinit(self: *GitHub) void {
+    pub fn deinit(self: *Shell) void {
         if (!self.closed) {
             if (self.child.stdin) |*stdin| {
                 stdin.writeAll("exit\n") catch {};
@@ -141,7 +141,7 @@ const GitHub = struct {
         }
     }
 
-    pub fn runCommand(self: *GitHub, command: []const u8, output_buffer: []u8) !CommandResult {
+    pub fn runCommand(self: *Shell, command: []const u8, output_buffer: []u8) !CommandResult {
         if (self.closed) return error.ProcessAlreadyClosed;
 
         self.next_marker_id += 1;
@@ -170,7 +170,7 @@ const GitHub = struct {
         }
     }
 
-    fn writeCommand(self: *GitHub, command: []const u8, marker: []const u8) !void {
+    fn writeCommand(self: *Shell, command: []const u8, marker: []const u8) !void {
         try self.child.stdin.?.writeAll(command);
         if (command.len == 0 or command[command.len - 1] != '\n') {
             try self.child.stdin.?.writeAll("\n");
@@ -185,14 +185,14 @@ const GitHub = struct {
         try self.child.stdin.?.writeAll(marker_command);
     }
 
-    fn appendStdout(self: *GitHub, bytes: []const u8) !void {
+    fn appendStdout(self: *Shell, bytes: []const u8) !void {
         const next_len = self.stdout_len + bytes.len;
         if (next_len > self.stdout_buffer.len) return error.StreamTooLong;
         @memcpy(self.stdout_buffer[self.stdout_len..next_len], bytes);
         self.stdout_len = next_len;
     }
 
-    fn consumeStdout(self: *GitHub, consumed: usize) void {
+    fn consumeStdout(self: *Shell, consumed: usize) void {
         if (consumed == 0) return;
         const remaining = self.stdout_len - consumed;
         std.mem.copyForwards(u8, self.stdout_buffer[0..remaining], self.stdout_buffer[consumed..self.stdout_len]);
@@ -247,8 +247,8 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    var github = try GitHub.init(allocator);
-    defer github.deinit();
+    var shell = try Shell.init(allocator);
+    defer shell.deinit();
 
     var stdin_buffer: [1024]u8 = undefined;
     var stdout_buffer: [1024]u8 = undefined;
@@ -273,17 +273,17 @@ pub fn main() !void {
     }
 }
 
-test "GitHub keeps child shell alive between commands" {
-    var github = try GitHub.init(std.testing.allocator);
-    defer github.deinit();
+test "Shell keeps child shell alive between commands" {
+    var shell = try Shell.init(std.testing.allocator);
+    defer shell.deinit();
 
     var first_output_buffer: [64]u8 = undefined;
-    const first = try github.runCommand("keep_alive_var=42", &first_output_buffer);
+    const first = try shell.runCommand("keep_alive_var=42", &first_output_buffer);
     try std.testing.expectEqual(@as(u8, 0), first.exit_code);
     try std.testing.expectEqualStrings("", first.output);
 
     var second_output_buffer: [64]u8 = undefined;
-    const second = try github.runCommand("echo \"$keep_alive_var\"", &second_output_buffer);
+    const second = try shell.runCommand("echo \"$keep_alive_var\"", &second_output_buffer);
     try std.testing.expectEqual(@as(u8, 0), second.exit_code);
     try std.testing.expectEqualStrings("42\n", second.output);
 }
