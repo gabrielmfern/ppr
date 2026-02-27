@@ -1450,12 +1450,12 @@ pub fn main() !void {
         try shell.runCommand(
             &outputBuffer,
             "gh pr create --base '{s}' --head '{s}' --title '{s}' --body-file '{s}' --reviewer '{s}'{s}",
-            .{ base, headBranch, title, bodyFilePath orelse "", reviewersArgument, if (draft) " --draft" else "" },
+            .{ base, headBranch, title, bodyFilePath, reviewersArgument, if (draft) " --draft" else "" },
         )
     else
         try shell.runCommand(
             &outputBuffer,
-            "gh pr create --base '{s}' --head '{s}' --title '{s}' --reviewer '{s}'{s}",
+            "gh pr create --base '{s}' --head '{s}' --body '' --title '{s}' --reviewer '{s}'{s}",
             .{ base, headBranch, title, reviewersArgument, if (draft) " --draft" else "" },
         );
     if (createPrResult.exitCode != 0) {
