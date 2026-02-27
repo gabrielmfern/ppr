@@ -10,19 +10,343 @@ fn promptText(
     try writer.writeAll(prompt);
     try writer.flush();
 
-    var collecting = std.Io.Writer.fixed(outputBuffer);
-    _ = reader.streamDelimiterEnding(&collecting, '\n') catch |err| switch (err) {
-        error.ReadFailed => return error.ReadFailed,
-        error.WriteFailed => return error.StreamTooLong,
+    const RawTerminalMode = struct {
+        fd: std.posix.fd_t,
+        previous: std.posix.termios,
+
+        fn enter(fd: std.posix.fd_t) !@This() {
+            const previous = try std.posix.tcgetattr(fd);
+            var current = previous;
+
+            current.iflag.ICRNL = false;
+            current.iflag.IXON = false;
+            current.lflag.ICANON = false;
+            current.lflag.ECHO = false;
+            current.lflag.IEXTEN = false;
+
+            try std.posix.tcsetattr(fd, .FLUSH, current);
+            return .{
+                .fd = fd,
+                .previous = previous,
+            };
+        }
+
+        fn restore(self: *const @This()) void {
+            std.posix.tcsetattr(self.fd, .FLUSH, self.previous) catch {};
+        }
     };
 
-    if (reader.bufferedLen() > 0 and reader.buffered()[0] == '\n') {
-        reader.toss(1);
-    } else if (collecting.buffered().len == 0) {
-        return error.EndOfStream;
+    var liveEditing = std.posix.isatty(std.posix.STDIN_FILENO);
+    var rawMode: ?RawTerminalMode = null;
+
+    if (liveEditing) {
+        rawMode = RawTerminalMode.enter(std.posix.STDIN_FILENO) catch |err| switch (err) {
+            error.NotATerminal => null,
+            else => return err,
+        };
+        if (rawMode == null) liveEditing = false;
+    }
+    defer if (rawMode) |raw| {
+        raw.restore();
+    };
+
+    const renderPromptLine = struct {
+        fn call(w: *std.Io.Writer, p: []const u8, text: []const u8, c: usize) !void {
+            try w.writeAll("\r");
+            try w.writeAll(p);
+            try w.writeAll(text);
+            try w.writeAll("\x1b[K");
+            const trailing = text.len - c;
+            if (trailing > 0) try w.print("\x1b[{d}D", .{trailing});
+            try w.flush();
+        }
+    }.call;
+
+    var textLen: usize = 0;
+    var cursor: usize = 0;
+
+    while (true) {
+        const byte = reader.takeByte() catch |err| switch (err) {
+            error.EndOfStream => {
+                if (textLen == 0) return error.EndOfStream;
+                if (liveEditing) {
+                    try renderPromptLine(writer, prompt, outputBuffer[0..textLen], textLen);
+                    try writer.writeAll("\n");
+                    try writer.flush();
+                }
+                return outputBuffer[0..textLen];
+            },
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        var shouldRender = false;
+
+        switch (byte) {
+            '\n' => {
+                if (liveEditing) {
+                    try renderPromptLine(writer, prompt, outputBuffer[0..textLen], textLen);
+                    try writer.writeAll("\n");
+                    try writer.flush();
+                }
+                return outputBuffer[0..textLen];
+            },
+            '\r' => {
+                if (reader.bufferedLen() > 0 and reader.buffered()[0] == '\n') {
+                    reader.toss(1);
+                }
+                if (liveEditing) {
+                    try renderPromptLine(writer, prompt, outputBuffer[0..textLen], textLen);
+                    try writer.writeAll("\n");
+                    try writer.flush();
+                }
+                return outputBuffer[0..textLen];
+            },
+            0x01 => {
+                cursor = 0; // Ctrl+A
+                shouldRender = true;
+            },
+            0x05 => {
+                cursor = textLen; // Ctrl+E
+                shouldRender = true;
+            },
+            0x08, 0x7f => {
+                deletePromptByteBeforeCursor(outputBuffer, &textLen, &cursor);
+                shouldRender = true;
+            },
+            0x1b => {
+                const action = try readPromptEscapeAction(reader);
+                switch (action) {
+                    .none => {},
+                    .submit => {
+                        if (liveEditing) {
+                            try renderPromptLine(writer, prompt, outputBuffer[0..textLen], textLen);
+                            try writer.writeAll("\n");
+                            try writer.flush();
+                        }
+                        return outputBuffer[0..textLen];
+                    },
+                    .move_left => {
+                        if (cursor > 0) cursor -= 1;
+                        shouldRender = true;
+                    },
+                    .move_right => {
+                        if (cursor < textLen) cursor += 1;
+                        shouldRender = true;
+                    },
+                    .move_home => {
+                        cursor = 0;
+                        shouldRender = true;
+                    },
+                    .move_end => {
+                        cursor = textLen;
+                        shouldRender = true;
+                    },
+                    .move_word_left => {
+                        moveCursorWordLeft(outputBuffer[0..textLen], &cursor);
+                        shouldRender = true;
+                    },
+                    .move_word_right => {
+                        moveCursorWordRight(outputBuffer[0..textLen], &cursor);
+                        shouldRender = true;
+                    },
+                }
+            },
+            else => {
+                if (byte == '\t' or (byte >= 0x20 and byte != 0x7f)) {
+                    try insertPromptByte(outputBuffer, &textLen, &cursor, byte);
+                    shouldRender = true;
+                }
+            },
+        }
+
+        if (liveEditing and shouldRender) {
+            try renderPromptLine(writer, prompt, outputBuffer[0..textLen], cursor);
+        }
+    }
+}
+
+const PromptEscapeAction = enum {
+    none,
+    submit,
+    move_left,
+    move_right,
+    move_home,
+    move_end,
+    move_word_left,
+    move_word_right,
+};
+
+const CsiParameters = struct {
+    first: ?usize,
+    second: ?usize,
+};
+
+fn insertPromptByte(
+    outputBuffer: []u8,
+    textLen: *usize,
+    cursor: *usize,
+    byte: u8,
+) !void {
+    if (textLen.* >= outputBuffer.len) return error.StreamTooLong;
+    if (cursor.* < textLen.*) {
+        @memmove(outputBuffer[cursor.* + 1 .. textLen.* + 1], outputBuffer[cursor.*..textLen.*]);
+    }
+    outputBuffer[cursor.*] = byte;
+    textLen.* += 1;
+    cursor.* += 1;
+}
+
+fn deletePromptByteBeforeCursor(outputBuffer: []u8, textLen: *usize, cursor: *usize) void {
+    if (cursor.* == 0) return;
+    if (cursor.* < textLen.*) {
+        @memmove(outputBuffer[cursor.* - 1 .. textLen.* - 1], outputBuffer[cursor.*..textLen.*]);
+    }
+    cursor.* -= 1;
+    textLen.* -= 1;
+}
+
+fn moveCursorWordLeft(text: []const u8, cursor: *usize) void {
+    while (cursor.* > 0 and std.ascii.isWhitespace(text[cursor.* - 1])) {
+        cursor.* -= 1;
+    }
+    while (cursor.* > 0 and !std.ascii.isWhitespace(text[cursor.* - 1])) {
+        cursor.* -= 1;
+    }
+}
+
+fn moveCursorWordRight(text: []const u8, cursor: *usize) void {
+    while (cursor.* < text.len and std.ascii.isWhitespace(text[cursor.*])) {
+        cursor.* += 1;
+    }
+    while (cursor.* < text.len and !std.ascii.isWhitespace(text[cursor.*])) {
+        cursor.* += 1;
+    }
+}
+
+fn readPromptEscapeAction(reader: *std.Io.Reader) !PromptEscapeAction {
+    const first = reader.takeByte() catch |err| switch (err) {
+        error.EndOfStream => return .none,
+        error.ReadFailed => return error.ReadFailed,
+    };
+
+    switch (first) {
+        '\n', '\r' => return .submit,
+        '[' => return readCsiEscapeAction(reader),
+        'O' => return readSs3EscapeAction(reader),
+        'b' => return .move_word_left, // Option+Left in many macOS terminal configs.
+        'f' => return .move_word_right, // Option+Right in many macOS terminal configs.
+        else => return .none,
+    }
+}
+
+fn readSs3EscapeAction(reader: *std.Io.Reader) !PromptEscapeAction {
+    const final = reader.takeByte() catch |err| switch (err) {
+        error.EndOfStream => return .none,
+        error.ReadFailed => return error.ReadFailed,
+    };
+
+    return switch (final) {
+        'D' => .move_left,
+        'C' => .move_right,
+        'H' => .move_home,
+        'F' => .move_end,
+        '\n', '\r' => .submit,
+        else => .none,
+    };
+}
+
+fn readCsiEscapeAction(reader: *std.Io.Reader) !PromptEscapeAction {
+    var sequence: [16]u8 = undefined;
+    var sequenceLen: usize = 0;
+
+    while (sequenceLen < sequence.len) {
+        const next = reader.takeByte() catch |err| switch (err) {
+            error.EndOfStream => return .none,
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        if (next == '\n' or next == '\r') return .submit;
+
+        sequence[sequenceLen] = next;
+        sequenceLen += 1;
+
+        // ANSI CSI final bytes are in [0x40, 0x7E].
+        if (next >= 0x40 and next <= 0x7e) break;
     }
 
-    return collecting.buffered();
+    if (sequenceLen == 0) return .none;
+    return classifyCsiEscapeAction(sequence[0..sequenceLen]);
+}
+
+fn classifyCsiEscapeAction(sequence: []const u8) PromptEscapeAction {
+    const final = sequence[sequence.len - 1];
+    const paramsText = sequence[0 .. sequence.len - 1];
+
+    return switch (final) {
+        'D' => classifyDirectionalEscape(paramsText, .move_left, .move_word_left, .move_home),
+        'C' => classifyDirectionalEscape(paramsText, .move_right, .move_word_right, .move_end),
+        'H' => .move_home,
+        'F' => .move_end,
+        '~' => classifyTildeEscape(paramsText),
+        else => .none,
+    };
+}
+
+fn classifyDirectionalEscape(
+    paramsText: []const u8,
+    baseAction: PromptEscapeAction,
+    wordAction: PromptEscapeAction,
+    commandAction: PromptEscapeAction,
+) PromptEscapeAction {
+    if (paramsText.len == 0) return baseAction;
+    const params = parseCsiParameters(paramsText) orelse return .none;
+
+    if (params.second) |modifier| {
+        // Common modifier encodings:
+        // 3 = Alt/Option, 9 = Cmd (seen in some terminal configs).
+        if (modifier == 3) return wordAction;
+        if (modifier == 9) return commandAction;
+    }
+
+    return baseAction;
+}
+
+fn classifyTildeEscape(paramsText: []const u8) PromptEscapeAction {
+    const params = parseCsiParameters(paramsText) orelse return .none;
+    const first = params.first orelse return .none;
+
+    return switch (first) {
+        1, 7 => .move_home,
+        4, 8 => .move_end,
+        else => .none,
+    };
+}
+
+fn parseCsiParameters(text: []const u8) ?CsiParameters {
+    if (text.len == 0) return .{ .first = null, .second = null };
+
+    if (std.mem.indexOfScalar(u8, text, ';')) |sep| {
+        return .{
+            .first = parseUnsigned(text[0..sep]),
+            .second = parseUnsigned(text[sep + 1 ..]),
+        };
+    }
+
+    return .{
+        .first = parseUnsigned(text),
+        .second = null,
+    };
+}
+
+fn parseUnsigned(text: []const u8) ?usize {
+    if (text.len == 0) return null;
+    var value: usize = 0;
+    for (text) |ch| {
+        if (!std.ascii.isDigit(ch)) return null;
+        value = std.math.mul(usize, value, 10) catch return null;
+        value = std.math.add(usize, value, ch - '0') catch return null;
+    }
+    return value;
 }
 
 fn promptConfirmation(
@@ -875,6 +1199,50 @@ test "promptText returns StreamTooLong when input exceeds fixed buffer" {
         error.StreamTooLong,
         promptText("Title: ", &reader, &writer, &inputBuffer),
     );
+}
+
+test "promptText supports command-left and command-right navigation" {
+    var reader = std.Io.Reader.fixed("world\x1b[Hhello \x1b[F!\n");
+    var outputBuffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
+    var inputBuffer: [64]u8 = undefined;
+
+    const text = try promptText("Title: ", &reader, &writer, &inputBuffer);
+    try std.testing.expectEqualStrings("hello world!", text);
+}
+
+test "promptText supports option-left and option-right word navigation" {
+    var reader = std.Io.Reader.fixed("hello world\x1bbbig \n");
+    var outputBuffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
+    var inputBuffer: [64]u8 = undefined;
+
+    const text = try promptText("Title: ", &reader, &writer, &inputBuffer);
+    try std.testing.expectEqualStrings("hello big world", text);
+
+    var secondReader = std.Io.Reader.fixed("hello world\x1b[H\x1bf brave\n");
+    var secondOutputBuffer: [128]u8 = undefined;
+    var secondWriter = std.Io.Writer.fixed(&secondOutputBuffer);
+    var secondInputBuffer: [64]u8 = undefined;
+    const secondText = try promptText("Title: ", &secondReader, &secondWriter, &secondInputBuffer);
+    try std.testing.expectEqualStrings("hello brave world", secondText);
+}
+
+test "promptText supports CSI modifier forms for option and command navigation" {
+    var reader = std.Io.Reader.fixed("one two\x1b[1;3Dthree \n");
+    var outputBuffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
+    var inputBuffer: [64]u8 = undefined;
+
+    const text = try promptText("Title: ", &reader, &writer, &inputBuffer);
+    try std.testing.expectEqualStrings("one three two", text);
+
+    var secondReader = std.Io.Reader.fixed("abc\x1b[1;9DSTART-\x1b[1;9C-END\n");
+    var secondOutputBuffer: [128]u8 = undefined;
+    var secondWriter = std.Io.Writer.fixed(&secondOutputBuffer);
+    var secondInputBuffer: [64]u8 = undefined;
+    const secondText = try promptText("Title: ", &secondReader, &secondWriter, &secondInputBuffer);
+    try std.testing.expectEqualStrings("START-abc-END", secondText);
 }
 
 test "promptEditor returns path and editor writes text to file" {
