@@ -5,12 +5,12 @@ fn promptText(
     prompt: []const u8,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
-    output_buffer: []u8,
+    outputBuffer: []u8,
 ) ![]u8 {
     try writer.writeAll(prompt);
     try writer.flush();
 
-    var collecting = std.Io.Writer.fixed(output_buffer);
+    var collecting = std.Io.Writer.fixed(outputBuffer);
     _ = reader.streamDelimiterEnding(&collecting, '\n') catch |err| switch (err) {
         error.ReadFailed => return error.ReadFailed,
         error.WriteFailed => return error.StreamTooLong,
@@ -30,8 +30,8 @@ fn promptConfirmation(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
 ) !?bool {
-    var input_buffer: [16]u8 = undefined;
-    const text = try promptText(prompt, reader, writer, &input_buffer);
+    var inputBuffer: [16]u8 = undefined;
+    const text = try promptText(prompt, reader, writer, &inputBuffer);
     const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
     if (std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes")) {
         return true;
@@ -42,100 +42,100 @@ fn promptConfirmation(
     return null;
 }
 
-fn copyTrimmed(input: []const u8, output_buffer: []u8) ![]u8 {
+fn copyTrimmed(input: []const u8, outputBuffer: []u8) ![]u8 {
     const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
-    if (trimmed.len > output_buffer.len) return error.StreamTooLong;
-    @memcpy(output_buffer[0..trimmed.len], trimmed);
-    return output_buffer[0..trimmed.len];
+    if (trimmed.len > outputBuffer.len) return error.StreamTooLong;
+    @memcpy(outputBuffer[0..trimmed.len], trimmed);
+    return outputBuffer[0..trimmed.len];
 }
 
-fn normalizeCommaSeparated(input: []const u8, output_buffer: []u8) ![]u8 {
+fn normalizeCommaSeparated(input: []const u8, outputBuffer: []u8) ![]u8 {
     var cursor: usize = 0;
     var parts = std.mem.splitScalar(u8, input, ',');
 
-    while (parts.next()) |part_raw| {
-        const part = std.mem.trim(u8, part_raw, &std.ascii.whitespace);
+    while (parts.next()) |partRaw| {
+        const part = std.mem.trim(u8, partRaw, &std.ascii.whitespace);
         if (part.len == 0) continue;
 
         if (cursor != 0) {
-            if (cursor >= output_buffer.len) return error.StreamTooLong;
-            output_buffer[cursor] = ',';
+            if (cursor >= outputBuffer.len) return error.StreamTooLong;
+            outputBuffer[cursor] = ',';
             cursor += 1;
         }
 
-        if (cursor + part.len > output_buffer.len) return error.StreamTooLong;
-        @memcpy(output_buffer[cursor .. cursor + part.len], part);
+        if (cursor + part.len > outputBuffer.len) return error.StreamTooLong;
+        @memcpy(outputBuffer[cursor .. cursor + part.len], part);
         cursor += part.len;
     }
 
-    return output_buffer[0..cursor];
+    return outputBuffer[0..cursor];
 }
 
 const Config = struct {
-    name_storage: [max_name_len]u8,
-    name_len: usize,
-    path_storage: [max_path_len]u8,
-    path_len: usize,
-    entries: [max_entries]Entry,
-    entries_len: usize,
+    nameBuffer: [maxNameLen]u8,
+    nameLen: usize,
+    pathBuffer: [maxPathLen]u8,
+    pathLen: usize,
+    entries: [maxEntries]Entry,
+    entriesLen: usize,
     created: bool,
 
-    const max_name_len = 64;
-    const max_path_len = 1024;
-    const max_entries = 256;
-    const max_handle_len = 128;
-    const max_file_size = 64 * 1024;
+    const maxNameLen = 64;
+    const maxPathLen = 1024;
+    const maxEntries = 256;
+    const maxHandleLen = 128;
+    const maxFileSize = 64 * 1024;
 
     const Entry = struct {
-        github_storage: [max_handle_len]u8,
-        github_len: usize,
-        slack_storage: [max_handle_len]u8,
-        slack_len: usize,
+        githubBuffer: [maxHandleLen]u8,
+        githubLen: usize,
+        slackBuffer: [maxHandleLen]u8,
+        slackLen: usize,
 
         fn github(self: *const Entry) []const u8 {
-            return self.github_storage[0..self.github_len];
+            return self.githubBuffer[0..self.githubLen];
         }
 
         fn slack(self: *const Entry) []const u8 {
-            return self.slack_storage[0..self.slack_len];
+            return self.slackBuffer[0..self.slackLen];
         }
     };
 
     pub fn init(
         name: []const u8,
-        github_reviewers: []const u8,
+        githubReviewers: []const u8,
     ) !Config {
         if (builtin.os.tag == .windows) return error.UnsupportedOperatingSystem;
         const home = std.posix.getenv("HOME") orelse return error.EnvironmentVariableNotFound;
-        return initWithHome(name, home, github_reviewers);
+        return initWithHome(name, home, githubReviewers);
     }
 
     fn initWithHome(
         name: []const u8,
         home: []const u8,
-        github_reviewers: []const u8,
+        githubReviewers: []const u8,
     ) !Config {
-        var config_dir_storage: [max_path_len]u8 = undefined;
-        const config_dir = try std.fmt.bufPrint(&config_dir_storage, "{s}/.config", .{home});
+        var configDirBuffer: [maxPathLen]u8 = undefined;
+        const configDir = try std.fmt.bufPrint(&configDirBuffer, "{s}/.config", .{home});
 
-        std.fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
+        std.fs.makeDirAbsolute(configDir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
         var config = Config{
-            .name_storage = undefined,
-            .name_len = 0,
-            .path_storage = undefined,
-            .path_len = 0,
+            .nameBuffer = undefined,
+            .nameLen = 0,
+            .pathBuffer = undefined,
+            .pathLen = 0,
             .entries = undefined,
-            .entries_len = 0,
+            .entriesLen = 0,
             .created = false,
         };
 
-        config.name_len = try copyInto(config.name_storage[0..], name);
-        const config_path = try std.fmt.bufPrint(&config.path_storage, "{s}/{s}.json", .{ config_dir, name });
-        config.path_len = config_path.len;
+        config.nameLen = try copyInto(config.nameBuffer[0..], name);
+        const configPath = try std.fmt.bufPrint(&config.pathBuffer, "{s}/{s}.json", .{ configDir, name });
+        config.pathLen = configPath.len;
 
         const exists = blk: {
             std.fs.accessAbsolute(config.path(), .{}) catch |err| switch (err) {
@@ -149,7 +149,7 @@ const Config = struct {
             try config.load();
         } else {
             config.created = true;
-            try config.seedDefaults(github_reviewers);
+            try config.seedDefaults(githubReviewers);
             try config.save();
         }
 
@@ -161,12 +161,12 @@ const Config = struct {
     }
 
     pub fn path(self: *const Config) []const u8 {
-        return self.path_storage[0..self.path_len];
+        return self.pathBuffer[0..self.pathLen];
     }
 
-    pub fn getSlackHandle(self: *const Config, github_handle: []const u8) ?[]const u8 {
-        for (self.entries[0..self.entries_len]) |*entry| {
-            if (std.mem.eql(u8, entry.github(), github_handle)) {
+    pub fn getSlackHandle(self: *const Config, githubHandle: []const u8) ?[]const u8 {
+        for (self.entries[0..self.entriesLen]) |*entry| {
+            if (std.mem.eql(u8, entry.github(), githubHandle)) {
                 return entry.slack();
             }
         }
@@ -179,39 +179,39 @@ const Config = struct {
         return value.len;
     }
 
-    fn putMapping(self: *Config, github_handle: []const u8, slack_handle: []const u8) !void {
-        if (github_handle.len == 0 or slack_handle.len == 0) return;
-        if (self.getSlackHandle(github_handle) != null) return;
-        if (self.entries_len >= max_entries) return error.StreamTooLong;
+    fn putMapping(self: *Config, githubHandle: []const u8, slackHandle: []const u8) !void {
+        if (githubHandle.len == 0 or slackHandle.len == 0) return;
+        if (self.getSlackHandle(githubHandle) != null) return;
+        if (self.entriesLen >= maxEntries) return error.StreamTooLong;
 
-        var entry = &self.entries[self.entries_len];
-        entry.github_len = try copyInto(entry.github_storage[0..], github_handle);
-        entry.slack_len = try copyInto(entry.slack_storage[0..], slack_handle);
-        self.entries_len += 1;
+        var entry = &self.entries[self.entriesLen];
+        entry.githubLen = try copyInto(entry.githubBuffer[0..], githubHandle);
+        entry.slackLen = try copyInto(entry.slackBuffer[0..], slackHandle);
+        self.entriesLen += 1;
     }
 
-    fn seedDefaults(self: *Config, github_reviewers: []const u8) !void {
-        var lines = std.mem.splitScalar(u8, github_reviewers, '\n');
-        while (lines.next()) |line_raw| {
-            const handle = std.mem.trim(u8, line_raw, &std.ascii.whitespace);
+    fn seedDefaults(self: *Config, githubReviewers: []const u8) !void {
+        var lines = std.mem.splitScalar(u8, githubReviewers, '\n');
+        while (lines.next()) |lineRaw| {
+            const handle = std.mem.trim(u8, lineRaw, &std.ascii.whitespace);
             if (handle.len == 0) continue;
             try self.putMapping(handle, handle);
         }
     }
 
     fn load(self: *Config) !void {
-        self.entries_len = 0;
+        self.entriesLen = 0;
 
         var file = try std.fs.openFileAbsolute(self.path(), .{});
         defer file.close();
 
-        var json_text_buffer: [max_file_size]u8 = undefined;
-        const n = try file.readAll(&json_text_buffer);
+        var jsonTextBuffer: [maxFileSize]u8 = undefined;
+        const n = try file.readAll(&jsonTextBuffer);
         var extra: [1]u8 = undefined;
         if (try file.read(&extra) != 0) return error.StreamTooLong;
-        const json_text = json_text_buffer[0..n];
+        const jsonText = jsonTextBuffer[0..n];
 
-        const trimmed = std.mem.trim(u8, json_text, &std.ascii.whitespace);
+        const trimmed = std.mem.trim(u8, jsonText, &std.ascii.whitespace);
         if (trimmed.len == 0) return;
 
         try self.parseJsonMap(trimmed);
@@ -223,12 +223,12 @@ const Config = struct {
         });
         defer file.close();
 
-        var write_buffer: [4096]u8 = undefined;
-        var file_writer = file.writer(&write_buffer);
-        const writer = &file_writer.interface;
+        var writeBuffer: [4096]u8 = undefined;
+        var fileWriter = file.writer(&writeBuffer);
+        const writer = &fileWriter.interface;
 
         try writer.writeAll("{");
-        for (self.entries[0..self.entries_len], 0..) |*entry, i| {
+        for (self.entries[0..self.entriesLen], 0..) |*entry, i| {
             if (i == 0) {
                 try writer.writeAll("\n");
             } else {
@@ -239,26 +239,26 @@ const Config = struct {
             try writer.writeAll(": ");
             try writeJsonString(writer, entry.slack());
         }
-        if (self.entries_len != 0) {
+        if (self.entriesLen != 0) {
             try writer.writeAll("\n");
         }
         try writer.writeAll("}\n");
-        try file_writer.interface.flush();
+        try fileWriter.interface.flush();
     }
 
-    fn skipWhitespace(json_text: []const u8, index: *usize) void {
-        while (index.* < json_text.len and std.ascii.isWhitespace(json_text[index.*])) : (index.* += 1) {}
+    fn skipWhitespace(jsonText: []const u8, index: *usize) void {
+        while (index.* < jsonText.len and std.ascii.isWhitespace(jsonText[index.*])) : (index.* += 1) {}
     }
 
-    fn parseJsonString(json_text: []const u8, index: *usize) ![]const u8 {
-        if (index.* >= json_text.len or json_text[index.*] != '"') return error.InvalidConfig;
+    fn parseJsonString(jsonText: []const u8, index: *usize) ![]const u8 {
+        if (index.* >= jsonText.len or jsonText[index.*] != '"') return error.InvalidConfig;
         index.* += 1;
         const start = index.*;
 
-        while (index.* < json_text.len) : (index.* += 1) {
-            const ch = json_text[index.*];
+        while (index.* < jsonText.len) : (index.* += 1) {
+            const ch = jsonText[index.*];
             if (ch == '"') {
-                const value = json_text[start..index.*];
+                const value = jsonText[start..index.*];
                 index.* += 1;
                 return value;
             }
@@ -268,35 +268,35 @@ const Config = struct {
         return error.InvalidConfig;
     }
 
-    fn parseJsonMap(self: *Config, json_text: []const u8) !void {
+    fn parseJsonMap(self: *Config, jsonText: []const u8) !void {
         var index: usize = 0;
-        skipWhitespace(json_text, &index);
-        if (index >= json_text.len or json_text[index] != '{') return error.InvalidConfig;
+        skipWhitespace(jsonText, &index);
+        if (index >= jsonText.len or jsonText[index] != '{') return error.InvalidConfig;
         index += 1;
 
-        skipWhitespace(json_text, &index);
-        if (index < json_text.len and json_text[index] == '}') {
+        skipWhitespace(jsonText, &index);
+        if (index < jsonText.len and jsonText[index] == '}') {
             index += 1;
-            skipWhitespace(json_text, &index);
-            if (index != json_text.len) return error.InvalidConfig;
+            skipWhitespace(jsonText, &index);
+            if (index != jsonText.len) return error.InvalidConfig;
             return;
         }
 
         while (true) {
-            const github_handle = try parseJsonString(json_text, &index);
-            skipWhitespace(json_text, &index);
-            if (index >= json_text.len or json_text[index] != ':') return error.InvalidConfig;
+            const githubHandle = try parseJsonString(jsonText, &index);
+            skipWhitespace(jsonText, &index);
+            if (index >= jsonText.len or jsonText[index] != ':') return error.InvalidConfig;
             index += 1;
-            skipWhitespace(json_text, &index);
-            const slack_handle = try parseJsonString(json_text, &index);
-            try self.putMapping(github_handle, slack_handle);
-            skipWhitespace(json_text, &index);
-            if (index >= json_text.len) return error.InvalidConfig;
+            skipWhitespace(jsonText, &index);
+            const slackHandle = try parseJsonString(jsonText, &index);
+            try self.putMapping(githubHandle, slackHandle);
+            skipWhitespace(jsonText, &index);
+            if (index >= jsonText.len) return error.InvalidConfig;
 
-            const ch = json_text[index];
+            const ch = jsonText[index];
             if (ch == ',') {
                 index += 1;
-                skipWhitespace(json_text, &index);
+                skipWhitespace(jsonText, &index);
                 continue;
             }
             if (ch == '}') {
@@ -306,8 +306,8 @@ const Config = struct {
             return error.InvalidConfig;
         }
 
-        skipWhitespace(json_text, &index);
-        if (index != json_text.len) return error.InvalidConfig;
+        skipWhitespace(jsonText, &index);
+        if (index != jsonText.len) return error.InvalidConfig;
     }
 
     fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
@@ -329,25 +329,25 @@ const Config = struct {
     }
 };
 
-fn worktreeIsClean(status_sb_output: []const u8) bool {
-    var lines = std.mem.tokenizeScalar(u8, status_sb_output, '\n');
+fn worktreeIsClean(statusSbOutput: []const u8) bool {
+    var lines = std.mem.tokenizeScalar(u8, statusSbOutput, '\n');
     _ = lines.next() orelse return false;
     return lines.next() == null;
 }
 
-fn promptEditor(path_buffer: []u8) ![]u8 {
-    return promptEditorWithScript("${EDITOR:-vi} \"$1\"", path_buffer);
+fn promptEditor(pathBuffer: []u8) ![]u8 {
+    return promptEditorWithScript("${EDITOR:-vi} \"$1\"", pathBuffer);
 }
 
-fn promptEditorWithScript(script: []const u8, path_buffer: []u8) ![]u8 {
+fn promptEditorWithScript(script: []const u8, pathBuffer: []u8) ![]u8 {
     if (builtin.os.tag == .windows) return error.UnsupportedOperatingSystem;
 
-    var path_storage: [128]u8 = undefined;
-    const temp_path = try createTempEditorFile(&path_storage);
-    errdefer std.fs.deleteFileAbsolute(temp_path) catch {};
+    var tempPathBuffer: [128]u8 = undefined;
+    const tempPath = try createTempEditorFile(&tempPathBuffer);
+    errdefer std.fs.deleteFileAbsolute(tempPath) catch {};
 
     var child = std.process.Child.init(
-        &.{ "/bin/sh", "-c", script, "ppr-editor", temp_path },
+        &.{ "/bin/sh", "-c", script, "ppr-editor", tempPath },
         std.heap.page_allocator,
     );
     child.stdin_behavior = .Inherit;
@@ -361,17 +361,17 @@ fn promptEditorWithScript(script: []const u8, path_buffer: []u8) ![]u8 {
         else => return error.EditorFailed,
     }
 
-    if (temp_path.len > path_buffer.len) return error.StreamTooLong;
-    @memcpy(path_buffer[0..temp_path.len], temp_path);
-    return path_buffer[0..temp_path.len];
+    if (tempPath.len > pathBuffer.len) return error.StreamTooLong;
+    @memcpy(pathBuffer[0..tempPath.len], tempPath);
+    return pathBuffer[0..tempPath.len];
 }
 
-fn createTempEditorFile(path_storage: []u8) ![]u8 {
+fn createTempEditorFile(pathBuffer: []u8) ![]u8 {
     for (0..32) |_| {
-        const random_suffix = std.crypto.random.int(u64);
-        const temp_path = try std.fmt.bufPrint(path_storage, "/tmp/ppr-editor-{x}.md", .{random_suffix});
+        const randomSuffix = std.crypto.random.int(u64);
+        const tempPath = try std.fmt.bufPrint(pathBuffer, "/tmp/ppr-editor-{x}.md", .{randomSuffix});
 
-        const file = std.fs.createFileAbsolute(temp_path, .{
+        const file = std.fs.createFileAbsolute(tempPath, .{
             .read = true,
             .exclusive = true,
         }) catch |err| switch (err) {
@@ -379,22 +379,22 @@ fn createTempEditorFile(path_storage: []u8) ![]u8 {
             else => return err,
         };
         file.close();
-        return temp_path;
+        return tempPath;
     }
     return error.UnableToCreateTempFile;
 }
 
 const Shell = struct {
     child: std.process.Child,
-    stdout_buffer: [stdout_buffer_size]u8,
-    stdout_len: usize,
-    next_marker_id: u64,
+    stdoutBuffer: [stdoutBufferSize]u8,
+    stdoutLen: usize,
+    nextMarkerId: u64,
     closed: bool,
 
-    const stdout_buffer_size = 16 * 1024;
-    const marker_buffer_size = 64;
-    const marker_command_buffer_size = 256;
-    const command_buffer_size = 8192;
+    const stdoutBufferSize = 16 * 1024;
+    const markerBufferSize = 64;
+    const markerCommandBufferSize = 256;
+    const commandBufferSize = 8192;
 
     const CommandResult = struct {
         output: []u8,
@@ -402,9 +402,9 @@ const Shell = struct {
     };
 
     const MarkerParse = struct {
-        marker_start: usize,
-        consumed_end: usize,
-        exit_code: u8,
+        markerStart: usize,
+        consumedEnd: usize,
+        exitCode: u8,
     };
 
     pub fn init(allocator: std.mem.Allocator) !Shell {
@@ -418,9 +418,9 @@ const Shell = struct {
 
         return .{
             .child = child,
-            .stdout_buffer = undefined,
-            .stdout_len = 0,
-            .next_marker_id = 0,
+            .stdoutBuffer = undefined,
+            .stdoutLen = 0,
+            .nextMarkerId = 0,
             .closed = false,
         };
     }
@@ -439,18 +439,18 @@ const Shell = struct {
 
     pub fn runCommand(
         self: *Shell,
-        output_buffer: []u8,
-        comptime command_fmt: []const u8,
+        outputBuffer: []u8,
+        comptime commandFmt: []const u8,
         args: anytype,
     ) !CommandResult {
         if (self.closed) return error.ProcessAlreadyClosed;
 
-        var command_storage: [command_buffer_size]u8 = undefined;
-        const command = try std.fmt.bufPrint(&command_storage, command_fmt, args);
+        var commandBuffer: [commandBufferSize]u8 = undefined;
+        const command = try std.fmt.bufPrint(&commandBuffer, commandFmt, args);
 
-        self.next_marker_id += 1;
-        var marker_storage: [marker_buffer_size]u8 = undefined;
-        const marker = try std.fmt.bufPrint(&marker_storage, "__PPR_DONE_{d}__", .{self.next_marker_id});
+        self.nextMarkerId += 1;
+        var markerBuffer: [markerBufferSize]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&markerBuffer, "__PPR_DONE_{d}__", .{self.nextMarkerId});
 
         std.log.debug("[shell] running {s}", .{command});
         try self.writeCommand(command, marker);
@@ -458,14 +458,14 @@ const Shell = struct {
         var chunk: [1024]u8 = undefined;
 
         while (true) {
-            if (findMarker(self.stdout_buffer[0..self.stdout_len], marker)) |marker_parse| {
-                const output = self.stdout_buffer[0..marker_parse.marker_start];
-                if (output.len > output_buffer.len) return error.OutputBufferTooSmall;
-                @memcpy(output_buffer[0..output.len], output);
-                self.consumeStdout(marker_parse.consumed_end);
+            if (findMarker(self.stdoutBuffer[0..self.stdoutLen], marker)) |markerParse| {
+                const output = self.stdoutBuffer[0..markerParse.markerStart];
+                if (output.len > outputBuffer.len) return error.OutputBufferTooSmall;
+                @memcpy(outputBuffer[0..output.len], output);
+                self.consumeStdout(markerParse.consumedEnd);
                 return .{
-                    .output = output_buffer[0..output.len],
-                    .exitCode = marker_parse.exit_code,
+                    .output = outputBuffer[0..output.len],
+                    .exitCode = markerParse.exitCode,
                 };
             }
 
@@ -481,62 +481,62 @@ const Shell = struct {
             try self.child.stdin.?.writeAll("\n");
         }
 
-        var marker_command_storage: [marker_command_buffer_size]u8 = undefined;
-        const marker_command = try std.fmt.bufPrint(
-            &marker_command_storage,
+        var markerCommandBuffer: [markerCommandBufferSize]u8 = undefined;
+        const markerCommand = try std.fmt.bufPrint(
+            &markerCommandBuffer,
             "printf '{s}:%d\\n' $?\n",
             .{marker},
         );
-        try self.child.stdin.?.writeAll(marker_command);
+        try self.child.stdin.?.writeAll(markerCommand);
     }
 
     fn appendStdout(self: *Shell, bytes: []const u8) !void {
-        const next_len = self.stdout_len + bytes.len;
-        if (next_len > self.stdout_buffer.len) return error.StreamTooLong;
-        @memcpy(self.stdout_buffer[self.stdout_len..next_len], bytes);
-        self.stdout_len = next_len;
+        const nextLen = self.stdoutLen + bytes.len;
+        if (nextLen > self.stdoutBuffer.len) return error.StreamTooLong;
+        @memcpy(self.stdoutBuffer[self.stdoutLen..nextLen], bytes);
+        self.stdoutLen = nextLen;
     }
 
     fn consumeStdout(self: *Shell, consumed: usize) void {
         if (consumed == 0) return;
-        const remaining = self.stdout_len - consumed;
-        std.mem.copyForwards(u8, self.stdout_buffer[0..remaining], self.stdout_buffer[consumed..self.stdout_len]);
-        self.stdout_len = remaining;
+        const remaining = self.stdoutLen - consumed;
+        std.mem.copyForwards(u8, self.stdoutBuffer[0..remaining], self.stdoutBuffer[consumed..self.stdoutLen]);
+        self.stdoutLen = remaining;
     }
 
     fn findMarker(buffer: []const u8, marker: []const u8) ?MarkerParse {
-        var search_from: usize = 0;
+        var searchFrom: usize = 0;
 
-        while (std.mem.indexOfPos(u8, buffer, search_from, marker)) |marker_start| {
-            const status_start = marker_start + marker.len;
-            if (status_start >= buffer.len) return null;
-            if (buffer[status_start] != ':') {
-                search_from = marker_start + 1;
+        while (std.mem.indexOfPos(u8, buffer, searchFrom, marker)) |markerStart| {
+            const statusStart = markerStart + marker.len;
+            if (statusStart >= buffer.len) return null;
+            if (buffer[statusStart] != ':') {
+                searchFrom = markerStart + 1;
                 continue;
             }
 
-            var status_end = status_start + 1;
-            while (status_end < buffer.len and std.ascii.isDigit(buffer[status_end])) : (status_end += 1) {}
+            var statusEnd = statusStart + 1;
+            while (statusEnd < buffer.len and std.ascii.isDigit(buffer[statusEnd])) : (statusEnd += 1) {}
 
-            if (status_end == status_start + 1) {
-                search_from = marker_start + 1;
+            if (statusEnd == statusStart + 1) {
+                searchFrom = markerStart + 1;
                 continue;
             }
-            if (status_end >= buffer.len) return null;
-            if (buffer[status_end] != '\n') {
-                search_from = marker_start + 1;
+            if (statusEnd >= buffer.len) return null;
+            if (buffer[statusEnd] != '\n') {
+                searchFrom = markerStart + 1;
                 continue;
             }
 
-            const exit_code = std.fmt.parseInt(u8, buffer[(status_start + 1)..status_end], 10) catch {
-                search_from = marker_start + 1;
+            const exitCode = std.fmt.parseInt(u8, buffer[(statusStart + 1)..statusEnd], 10) catch {
+                searchFrom = markerStart + 1;
                 continue;
             };
 
             return .{
-                .marker_start = marker_start,
-                .consumed_end = status_end + 1,
-                .exit_code = exit_code,
+                .markerStart = markerStart,
+                .consumedEnd = statusEnd + 1,
+                .exitCode = exitCode,
             };
         }
 
@@ -583,10 +583,10 @@ pub fn main() !void {
     var shell = try Shell.init(allocator);
     defer shell.deinit();
 
-    var stdin_buffer: [1024]u8 = undefined;
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdin = std.fs.File.stdin().reader(&stdin_buffer);
-    var stdout = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdinBuffer: [1024]u8 = undefined;
+    var stdoutBuffer: [1024]u8 = undefined;
+    var stdin = std.fs.File.stdin().reader(&stdinBuffer);
+    var stdout = std.fs.File.stdout().writer(&stdoutBuffer);
 
     const reader = &stdin.interface;
     const writer = &stdout.interface;
@@ -675,8 +675,8 @@ pub fn main() !void {
 
     const worktreeStatusResult = try shell.runCommand(&outputBuffer, "git status -sb", .{});
     if (!worktreeIsClean(worktreeStatusResult.output)) {
-        const continue_anyway = (try promptConfirmation("You have something to commit. Do it anyway? (Y/n)", reader, writer)) orelse true;
-        if (!continue_anyway) {
+        const continueAnyway = (try promptConfirmation("You have something to commit. Do it anyway? (Y/n)", reader, writer)) orelse true;
+        if (!continueAnyway) {
             return;
         }
     }
@@ -772,24 +772,24 @@ test "Shell keeps child shell alive between commands" {
     var shell = try Shell.init(std.testing.allocator);
     defer shell.deinit();
 
-    var first_output_buffer: [64]u8 = undefined;
-    const first = try shell.runCommand(&first_output_buffer, "keep_alive_var=42", .{});
+    var firstOutputBuffer: [64]u8 = undefined;
+    const first = try shell.runCommand(&firstOutputBuffer, "keepAliveVar=42", .{});
     try std.testing.expectEqual(@as(u8, 0), first.exitCode);
     try std.testing.expectEqualStrings("", first.output);
 
-    var second_output_buffer: [64]u8 = undefined;
-    const second = try shell.runCommand(&second_output_buffer, "echo \"$keep_alive_var\"", .{});
+    var secondOutputBuffer: [64]u8 = undefined;
+    const second = try shell.runCommand(&secondOutputBuffer, "echo \"$keepAliveVar\"", .{});
     try std.testing.expectEqual(@as(u8, 0), second.exitCode);
     try std.testing.expectEqualStrings("42\n", second.output);
 }
 
 test "promptText reads one line and writes prompt" {
     var reader = std.Io.Reader.fixed("octocat\nextra");
-    var output_storage: [64]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output_storage);
-    var input_storage: [32]u8 = undefined;
+    var outputBuffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
+    var inputBuffer: [32]u8 = undefined;
 
-    const text = try promptText("GitHub username: ", &reader, &writer, &input_storage);
+    const text = try promptText("GitHub username: ", &reader, &writer, &inputBuffer);
 
     try std.testing.expectEqualStrings("GitHub username: ", writer.buffered());
     try std.testing.expectEqualStrings("octocat", text);
@@ -797,32 +797,32 @@ test "promptText reads one line and writes prompt" {
 
 test "promptText returns EndOfStream when no input is available" {
     var reader = std.Io.Reader.fixed("");
-    var output_storage: [32]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output_storage);
-    var input_storage: [32]u8 = undefined;
+    var outputBuffer: [32]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
+    var inputBuffer: [32]u8 = undefined;
 
     try std.testing.expectError(
         error.EndOfStream,
-        promptText("> ", &reader, &writer, &input_storage),
+        promptText("> ", &reader, &writer, &inputBuffer),
     );
     try std.testing.expectEqualStrings("> ", writer.buffered());
 }
 
 test "promptText returns StreamTooLong when input exceeds fixed buffer" {
     var reader = std.Io.Reader.fixed("this-input-is-too-long\n");
-    var output_storage: [64]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output_storage);
-    var input_storage: [4]u8 = undefined;
+    var outputBuffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
+    var inputBuffer: [4]u8 = undefined;
 
     try std.testing.expectError(
         error.StreamTooLong,
-        promptText("Title: ", &reader, &writer, &input_storage),
+        promptText("Title: ", &reader, &writer, &inputBuffer),
     );
 }
 
 test "promptEditor returns path and editor writes text to file" {
-    var path_buffer: [256]u8 = undefined;
-    const path = try promptEditorWithScript("printf 'body from editor' > \"$1\"", &path_buffer);
+    var pathBuffer: [256]u8 = undefined;
+    const path = try promptEditorWithScript("printf 'body from editor' > \"$1\"", &pathBuffer);
     defer std.fs.deleteFileAbsolute(path) catch {};
 
     var file = try std.fs.openFileAbsolute(path, .{});
@@ -834,25 +834,25 @@ test "promptEditor returns path and editor writes text to file" {
 }
 
 test "promptEditor returns StreamTooLong when path buffer is too small" {
-    var path_buffer: [4]u8 = undefined;
+    var pathBuffer: [4]u8 = undefined;
     try std.testing.expectError(
         error.StreamTooLong,
-        promptEditorWithScript(":", &path_buffer),
+        promptEditorWithScript(":", &pathBuffer),
     );
 }
 
 test "promptEditor returns EditorFailed on non-zero exit" {
-    var path_buffer: [128]u8 = undefined;
+    var pathBuffer: [128]u8 = undefined;
     try std.testing.expectError(
         error.EditorFailed,
-        promptEditorWithScript("exit 2", &path_buffer),
+        promptEditorWithScript("exit 2", &pathBuffer),
     );
 }
 
 test "promptConfirmation accepts yes" {
     var reader = std.Io.Reader.fixed("YeS\n");
-    var output_storage: [64]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output_storage);
+    var outputBuffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
 
     const accepted = try promptConfirmation("Continue? (y/N): ", &reader, &writer);
     try std.testing.expect(accepted == true);
@@ -861,8 +861,8 @@ test "promptConfirmation accepts yes" {
 
 test "promptConfirmation null on empty input" {
     var reader = std.Io.Reader.fixed("\n");
-    var output_storage: [64]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output_storage);
+    var outputBuffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
 
     const accepted = try promptConfirmation("Continue? (y/N): ", &reader, &writer);
     try std.testing.expect(accepted == null);
@@ -871,8 +871,8 @@ test "promptConfirmation null on empty input" {
 
 test "promptConfirmation returns null for invalid answer" {
     var reader = std.Io.Reader.fixed("maybe\n");
-    var output_storage: [64]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output_storage);
+    var outputBuffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&outputBuffer);
 
     const accepted = try promptConfirmation("Continue? (y/N): ", &reader, &writer);
     try std.testing.expect(accepted == null);
@@ -897,8 +897,8 @@ test "Config init creates file and defaults github handles to themselves" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var home_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const home = try tmp.dir.realpath(".", &home_storage);
+    var homeBuffer: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &homeBuffer);
 
     var config = try Config.initWithHome("ppr-test", home, "alice\nbob\n");
     defer config.deinit();
@@ -907,37 +907,37 @@ test "Config init creates file and defaults github handles to themselves" {
     try std.testing.expectEqualStrings("alice", config.getSlackHandle("alice").?);
     try std.testing.expectEqualStrings("bob", config.getSlackHandle("bob").?);
 
-    var config_path_storage: [1024]u8 = undefined;
-    const config_path = try std.fmt.bufPrint(&config_path_storage, "{s}/.config/ppr-test.json", .{home});
+    var configPathBuffer: [1024]u8 = undefined;
+    const configPath = try std.fmt.bufPrint(&configPathBuffer, "{s}/.config/ppr-test.json", .{home});
 
-    var file = try std.fs.openFileAbsolute(config_path, .{});
+    var file = try std.fs.openFileAbsolute(configPath, .{});
     defer file.close();
 
-    var json_text_buffer: [4096]u8 = undefined;
-    const n = try file.readAll(&json_text_buffer);
-    const json_text = json_text_buffer[0..n];
-    try std.testing.expect(std.mem.indexOf(u8, json_text, "\"alice\": \"alice\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json_text, "\"bob\": \"bob\"") != null);
+    var jsonTextBuffer: [4096]u8 = undefined;
+    const n = try file.readAll(&jsonTextBuffer);
+    const jsonText = jsonTextBuffer[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, jsonText, "\"alice\": \"alice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonText, "\"bob\": \"bob\"") != null);
 }
 
 test "Config init loads existing reviewer to slack map" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var home_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const home = try tmp.dir.realpath(".", &home_storage);
+    var homeBuffer: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &homeBuffer);
 
-    var config_dir_storage: [1024]u8 = undefined;
-    const config_dir = try std.fmt.bufPrint(&config_dir_storage, "{s}/.config", .{home});
-    std.fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
+    var configDirBuffer: [1024]u8 = undefined;
+    const configDir = try std.fmt.bufPrint(&configDirBuffer, "{s}/.config", .{home});
+    std.fs.makeDirAbsolute(configDir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var config_path_storage: [1024]u8 = undefined;
-    const config_path = try std.fmt.bufPrint(&config_path_storage, "{s}/ppr-test.json", .{config_dir});
+    var configPathBuffer: [1024]u8 = undefined;
+    const configPath = try std.fmt.bufPrint(&configPathBuffer, "{s}/ppr-test.json", .{configDir});
 
-    var file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    var file = try std.fs.createFileAbsolute(configPath, .{ .truncate = true });
     defer file.close();
     try file.writeAll(
         \\{
@@ -958,21 +958,21 @@ test "generateSlackMessage uses slack map and falls back to github handle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var home_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const home = try tmp.dir.realpath(".", &home_storage);
+    var homeBuffer: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &homeBuffer);
 
     var config = try Config.initWithHome("ppr-test-slack-message", home, "");
     defer config.deinit();
     try config.putMapping("alice", "alice.slack");
 
     var reviewers = [_][]const u8{ "alice", "bob" };
-    var msg_buffer: [512]u8 = undefined;
+    var msgBuffer: [512]u8 = undefined;
     const message = try generateSlackMessage(
         "Fix race condition",
         "https://github.com/acme/repo/pull/123",
         reviewers[0..],
         &config,
-        &msg_buffer,
+        &msgBuffer,
     );
 
     try std.testing.expectEqualStrings(
