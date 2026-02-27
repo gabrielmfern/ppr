@@ -37,20 +37,19 @@ fn promptYesNo(
 }
 
 const GitHub = struct {
-    allocator: std.mem.Allocator,
     child: std.process.Child,
-    stdout_buffer: std.ArrayList(u8),
+    stdout_buffer: [stdout_buffer_size]u8,
+    stdout_len: usize,
     next_marker_id: u64,
     closed: bool,
+
+    const stdout_buffer_size = 16 * 1024;
+    const marker_buffer_size = 64;
+    const marker_command_buffer_size = 256;
 
     const CommandResult = struct {
         output: []u8,
         exit_code: u8,
-
-        pub fn deinit(self: *CommandResult, allocator: std.mem.Allocator) void {
-            allocator.free(self.output);
-            self.* = undefined;
-        }
     };
 
     const MarkerParse = struct {
@@ -69,9 +68,9 @@ const GitHub = struct {
         try child.spawn();
 
         return .{
-            .allocator = allocator,
             .child = child,
-            .stdout_buffer = .empty,
+            .stdout_buffer = undefined,
+            .stdout_len = 0,
             .next_marker_id = 0,
             .closed = false,
         };
@@ -87,34 +86,34 @@ const GitHub = struct {
             _ = self.child.wait() catch {};
             self.closed = true;
         }
-
-        self.stdout_buffer.deinit(self.allocator);
     }
 
-    pub fn runCommand(self: *GitHub, command: []const u8) !CommandResult {
+    pub fn runCommand(self: *GitHub, command: []const u8, output_buffer: []u8) !CommandResult {
         if (self.closed) return error.ProcessAlreadyClosed;
 
         self.next_marker_id += 1;
-        const marker = try std.fmt.allocPrint(self.allocator, "__PPR_DONE_{d}__", .{self.next_marker_id});
-        defer self.allocator.free(marker);
+        var marker_storage: [marker_buffer_size]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&marker_storage, "__PPR_DONE_{d}__", .{self.next_marker_id});
 
         try self.writeCommand(command, marker);
 
         var chunk: [1024]u8 = undefined;
 
         while (true) {
-            if (findMarker(self.stdout_buffer.items, marker)) |marker_parse| {
-                const output = try self.allocator.dupe(u8, self.stdout_buffer.items[0..marker_parse.marker_start]);
+            if (findMarker(self.stdout_buffer[0..self.stdout_len], marker)) |marker_parse| {
+                const output = self.stdout_buffer[0..marker_parse.marker_start];
+                if (output.len > output_buffer.len) return error.OutputBufferTooSmall;
+                @memcpy(output_buffer[0..output.len], output);
                 self.consumeStdout(marker_parse.consumed_end);
                 return .{
-                    .output = output,
+                    .output = output_buffer[0..output.len],
                     .exit_code = marker_parse.exit_code,
                 };
             }
 
             const n = try self.child.stdout.?.read(&chunk);
             if (n == 0) return error.UnexpectedEndOfStream;
-            try self.stdout_buffer.appendSlice(self.allocator, chunk[0..n]);
+            try self.appendStdout(chunk[0..n]);
         }
     }
 
@@ -124,20 +123,27 @@ const GitHub = struct {
             try self.child.stdin.?.writeAll("\n");
         }
 
-        const marker_command = try std.fmt.allocPrint(
-            self.allocator,
+        var marker_command_storage: [marker_command_buffer_size]u8 = undefined;
+        const marker_command = try std.fmt.bufPrint(
+            &marker_command_storage,
             "printf '{s}:%d\\n' $?\n",
             .{marker},
         );
-        defer self.allocator.free(marker_command);
         try self.child.stdin.?.writeAll(marker_command);
+    }
+
+    fn appendStdout(self: *GitHub, bytes: []const u8) !void {
+        const next_len = self.stdout_len + bytes.len;
+        if (next_len > self.stdout_buffer.len) return error.StreamTooLong;
+        @memcpy(self.stdout_buffer[self.stdout_len..next_len], bytes);
+        self.stdout_len = next_len;
     }
 
     fn consumeStdout(self: *GitHub, consumed: usize) void {
         if (consumed == 0) return;
-        const remaining = self.stdout_buffer.items.len - consumed;
-        std.mem.copyForwards(u8, self.stdout_buffer.items[0..remaining], self.stdout_buffer.items[consumed..]);
-        self.stdout_buffer.items.len = remaining;
+        const remaining = self.stdout_len - consumed;
+        std.mem.copyForwards(u8, self.stdout_buffer[0..remaining], self.stdout_buffer[consumed..self.stdout_len]);
+        self.stdout_len = remaining;
     }
 
     fn findMarker(buffer: []const u8, marker: []const u8) ?MarkerParse {
@@ -203,13 +209,13 @@ test "GitHub keeps child shell alive between commands" {
     var github = try GitHub.init(std.testing.allocator);
     defer github.deinit();
 
-    var first = try github.runCommand("keep_alive_var=42");
-    defer first.deinit(std.testing.allocator);
+    var first_output_buffer: [64]u8 = undefined;
+    const first = try github.runCommand("keep_alive_var=42", &first_output_buffer);
     try std.testing.expectEqual(@as(u8, 0), first.exit_code);
     try std.testing.expectEqualStrings("", first.output);
 
-    var second = try github.runCommand("echo \"$keep_alive_var\"");
-    defer second.deinit(std.testing.allocator);
+    var second_output_buffer: [64]u8 = undefined;
+    const second = try github.runCommand("echo \"$keep_alive_var\"", &second_output_buffer);
     try std.testing.expectEqual(@as(u8, 0), second.exit_code);
     try std.testing.expectEqualStrings("42\n", second.output);
 }
