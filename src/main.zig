@@ -1,6 +1,32 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+fn promptText(
+    allocator: std.mem.Allocator,
+    prompt: []const u8,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+) ![]u8 {
+    try writer.writeAll(prompt);
+    try writer.flush();
+
+    var collecting: std.Io.Writer.Allocating = .init(allocator);
+    defer collecting.deinit();
+
+    _ = reader.streamDelimiterEnding(&collecting.writer, '\n') catch |err| switch (err) {
+        error.ReadFailed => return error.ReadFailed,
+        error.WriteFailed => return error.OutOfMemory,
+    };
+
+    if (reader.bufferedLen() > 0 and reader.buffered()[0] == '\n') {
+        reader.toss(1);
+    } else if (collecting.written().len == 0) {
+        return error.EndOfStream;
+    }
+
+    return collecting.toOwnedSlice();
+}
+
 const GitHub = struct {
     allocator: std.mem.Allocator,
     child: std.process.Child,
@@ -161,4 +187,28 @@ test "GitHub keeps child shell alive between commands" {
     defer second.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), second.exit_code);
     try std.testing.expectEqualStrings("42\n", second.output);
+}
+
+test "promptText reads one line and writes prompt" {
+    var reader = std.Io.Reader.fixed("octocat\nextra");
+    var output_storage: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output_storage);
+
+    const text = try promptText(std.testing.allocator, "GitHub username: ", &reader, &writer);
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expectEqualStrings("GitHub username: ", writer.buffered());
+    try std.testing.expectEqualStrings("octocat", text);
+}
+
+test "promptText returns EndOfStream when no input is available" {
+    var reader = std.Io.Reader.fixed("");
+    var output_storage: [32]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output_storage);
+
+    try std.testing.expectError(
+        error.EndOfStream,
+        promptText(std.testing.allocator, "> ", &reader, &writer),
+    );
+    try std.testing.expectEqualStrings("> ", writer.buffered());
 }
