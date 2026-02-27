@@ -36,6 +36,19 @@ fn promptYesNo(
     return std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes");
 }
 
+fn copyTrimmed(input: []const u8, output_buffer: []u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
+    if (trimmed.len > output_buffer.len) return error.StreamTooLong;
+    @memcpy(output_buffer[0..trimmed.len], trimmed);
+    return output_buffer[0..trimmed.len];
+}
+
+fn worktreeIsClean(status_sb_output: []const u8) bool {
+    var lines = std.mem.tokenizeScalar(u8, status_sb_output, '\n');
+    _ = lines.next() orelse return false;
+    return lines.next() == null;
+}
+
 fn promptEditor(text_buffer: []u8) ![]u8 {
     return promptEditorWithScript("${EDITOR:-vi} \"$1\"", text_buffer);
 }
@@ -239,6 +252,99 @@ const Shell = struct {
     }
 };
 
+fn runCommandExpectSuccess(
+    shell: *Shell,
+    command: []const u8,
+    output_buffer: []u8,
+    check_name: []const u8,
+) !Shell.CommandResult {
+    const result = try shell.runCommand(command, output_buffer);
+    if (result.exit_code != 0) {
+        std.log.err("Safety check failed: {s} (exit code {d})", .{ check_name, result.exit_code });
+        const err_output = std.mem.trim(u8, result.output, &std.ascii.whitespace);
+        if (err_output.len != 0) {
+            std.log.err("{s}", .{err_output});
+        }
+        return error.SafetyCheckFailed;
+    }
+    return result;
+}
+
+fn runSafetyChecks(shell: *Shell, writer: *std.Io.Writer) !void {
+    var output_buffer: [32 * 1024]u8 = undefined;
+
+    _ = try runCommandExpectSuccess(
+        shell,
+        "gh auth status",
+        &output_buffer,
+        "gh auth status",
+    );
+
+    const base_result = try runCommandExpectSuccess(
+        shell,
+        "gh repo view --json defaultBranchRef -q .defaultBranchRef.name",
+        &output_buffer,
+        "gh repo view --json defaultBranchRef",
+    );
+    var base_storage: [128]u8 = undefined;
+    const base = try copyTrimmed(base_result.output, &base_storage);
+    if (base.len == 0) return error.SafetyCheckFailed;
+
+    const branch_result = try runCommandExpectSuccess(
+        shell,
+        "git rev-parse --abbrev-ref HEAD",
+        &output_buffer,
+        "git rev-parse --abbrev-ref HEAD",
+    );
+    var branch_storage: [128]u8 = undefined;
+    const branch = try copyTrimmed(branch_result.output, &branch_storage);
+    if (branch.len == 0 or std.mem.eql(u8, branch, "HEAD")) return error.DetachedHead;
+
+    const status_result = try runCommandExpectSuccess(
+        shell,
+        "git status -sb",
+        &output_buffer,
+        "git status -sb",
+    );
+    if (!worktreeIsClean(status_result.output)) return error.WorktreeNotClean;
+
+    var existing_pr_cmd_storage: [512]u8 = undefined;
+    const existing_pr_cmd = try std.fmt.bufPrint(
+        &existing_pr_cmd_storage,
+        "gh pr list --head '{s}' --base '{s}' --state open --json url --jq '.[0].url // \"\"'",
+        .{ branch, base },
+    );
+    const existing_pr_result = try runCommandExpectSuccess(
+        shell,
+        existing_pr_cmd,
+        &output_buffer,
+        "gh pr list --head <branch> --base <base> --state open",
+    );
+    var existing_pr_storage: [512]u8 = undefined;
+    const existing_pr_url = try copyTrimmed(existing_pr_result.output, &existing_pr_storage);
+    if (existing_pr_url.len != 0) {
+        try writer.print("An open PR already exists: {s}\n", .{existing_pr_url});
+        try writer.flush();
+        return error.OpenPullRequestAlreadyExists;
+    }
+
+    var commit_range_cmd_storage: [256]u8 = undefined;
+    const commit_range_cmd = try std.fmt.bufPrint(
+        &commit_range_cmd_storage,
+        "git log --oneline 'origin/{s}..HEAD'",
+        .{base},
+    );
+    const commit_range_result = try runCommandExpectSuccess(
+        shell,
+        commit_range_cmd,
+        &output_buffer,
+        "git log --oneline origin/<base>..HEAD",
+    );
+    if (std.mem.trim(u8, commit_range_result.output, &std.ascii.whitespace).len == 0) {
+        return error.NoCommitsToPullRequest;
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) {
@@ -257,6 +363,8 @@ pub fn main() !void {
 
     const reader = &stdin.interface;
     const writer = &stdout.interface;
+
+    try runSafetyChecks(&shell, writer);
 
     var titleBuffer: [512]u8 = undefined;
     const title = try promptText("Title: ", reader, writer, &titleBuffer);
@@ -375,4 +483,18 @@ test "promptYesNo returns false for invalid answer" {
     const accepted = try promptYesNo("Continue? (y/N): ", &reader, &writer);
     try std.testing.expect(!accepted);
     try std.testing.expectEqualStrings("Continue? (y/N): ", writer.buffered());
+}
+
+test "copyTrimmed trims and copies into fixed buffer" {
+    var out: [16]u8 = undefined;
+    const copied = try copyTrimmed("  abc \n", &out);
+    try std.testing.expectEqualStrings("abc", copied);
+}
+
+test "worktreeIsClean returns true when status has only branch line" {
+    try std.testing.expect(worktreeIsClean("## main...origin/main\n"));
+}
+
+test "worktreeIsClean returns false when status has file changes" {
+    try std.testing.expect(!worktreeIsClean("## main...origin/main\n M src/main.zig\n"));
 }
