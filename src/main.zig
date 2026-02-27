@@ -471,15 +471,24 @@ pub fn main() !void {
     var repoBuffer: [256]u8 = undefined;
     const repo = try copyTrimmed(repoResult.output, &repoBuffer);
 
+    const currentUserResult = try shell.runCommand("gh api user --jq .login", &outputBuffer);
+    if (currentUserResult.exitCode != 0) return error.SafetyCheckFailed;
+    var currentUserBuffer: [128]u8 = undefined;
+    const currentUser = try copyTrimmed(currentUserResult.output, &currentUserBuffer);
+
     var collaboratorsCommandBuffer: [512]u8 = undefined;
     const collaboratorsCommand = try std.fmt.bufPrint(
         &collaboratorsCommandBuffer,
-        "gh api 'repos/{s}/collaborators' --paginate --jq '.[].login'",
-        .{repo},
+        "gh api 'repos/{s}/collaborators' --paginate --jq '.[] | select(.login != \"{s}\") | .login'",
+        .{ repo, currentUser },
     );
     const collaboratorsResult = try shell.runCommand(collaboratorsCommand, &outputBuffer);
-    if (collaboratorsResult.exitCode == 0 and std.mem.trim(u8, collaboratorsResult.output, &std.ascii.whitespace).len != 0) {
-        try writer.print("Available user reviewers:\n{s}\n", .{std.mem.trimRight(u8, collaboratorsResult.output, &std.ascii.whitespace)});
+    const collaboratorsList = if (collaboratorsResult.exitCode == 0)
+        std.mem.trim(u8, collaboratorsResult.output, &std.ascii.whitespace)
+    else
+        "";
+    if (collaboratorsList.len != 0) {
+        try writer.print("Available user reviewers:\n{s}\n", .{collaboratorsList});
         try writer.flush();
     }
 
@@ -490,15 +499,22 @@ pub fn main() !void {
         .{repo},
     );
     const teamsResult = try shell.runCommand(teamsCommand, &outputBuffer);
-    if (teamsResult.exitCode == 0 and std.mem.trim(u8, teamsResult.output, &std.ascii.whitespace).len != 0) {
-        try writer.print("Available team reviewers:\n{s}\n", .{std.mem.trimRight(u8, teamsResult.output, &std.ascii.whitespace)});
+    const teamsList = if (teamsResult.exitCode == 0)
+        std.mem.trim(u8, teamsResult.output, &std.ascii.whitespace)
+    else
+        "";
+    if (teamsList.len != 0) {
+        try writer.print("Available team reviewers:\n{s}\n", .{teamsList});
         try writer.flush();
     }
 
-    var reviewerInputBuffer: [2048]u8 = undefined;
-    const reviewersInput = try promptText("Reviewers (comma-separated, optional): ", reader, writer, &reviewerInputBuffer);
     var reviewersBuffer: [2048]u8 = undefined;
-    const reviewers = try normalizeCommaSeparated(reviewersInput, &reviewersBuffer);
+    var reviewers: []const u8 = &.{};
+    if (collaboratorsList.len != 0 or teamsList.len != 0) {
+        var reviewerInputBuffer: [2048]u8 = undefined;
+        const reviewersInput = try promptText("Reviewers (comma-separated, optional): ", reader, writer, &reviewerInputBuffer);
+        reviewers = try normalizeCommaSeparated(reviewersInput, &reviewersBuffer);
+    }
 
     var bodyFilePathBuffer: [128]u8 = undefined;
     const bodyFilePath = try createTempEditorFile(&bodyFilePathBuffer);
