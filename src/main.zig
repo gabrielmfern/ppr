@@ -322,6 +322,19 @@ pub fn main() !void {
         return error.SafetyCheckFailed;
     }
 
+    var branchPushedCommandBuffer: [256]u8 = undefined;
+    const branchPushedCommand = try std.fmt.bufPrint(
+        &branchPushedCommandBuffer,
+        "git ls-remote --exit-code --heads origin '{s}' >/dev/null",
+        .{headBranch},
+    );
+    const branchPushedResult = try shell.runCommand(branchPushedCommand, &outputBuffer);
+    if (branchPushedResult.exitCode != 0) {
+        try writer.print("Current branch is not pushed to origin. Run `git push -u origin {s}` first.\n", .{headBranch});
+        try writer.flush();
+        return error.SafetyCheckFailed;
+    }
+
     const worktreeStatusResult = try shell.runCommand("git status -sb", &outputBuffer);
     if (!worktreeIsClean(worktreeStatusResult.output)) {
         const continue_anyway = (try promptConfirmation("You have something to commit. Do it anyway? (Y/n)", reader, writer)) orelse true;
