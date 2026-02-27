@@ -240,6 +240,16 @@ const GitHub = struct {
 };
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer if (gpa.deinit() == .leak) {
+        std.log.err("Memory leak detected");
+    };
+
+    const allocator = gpa.allocator();
+
+    const github = try GitHub.init(allocator);
+    defer github.deinit();
+
     var stdin_buffer: [1024]u8 = undefined;
     var stdout_buffer: [1024]u8 = undefined;
     var stdin = std.fs.File.stdin().reader(&stdin_buffer);
