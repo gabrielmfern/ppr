@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const nerd = @import("nerd");
 
 const RawTerminalMode = struct {
     fd: std.posix.fd_t,
@@ -1226,18 +1227,30 @@ pub fn main() !void {
         std.log.err("Memory leak detected", .{});
     };
 
-    const allocator = gpa.allocator();
+    const gpaAllocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(gpaAllocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
 
     var shell = try Shell.init(allocator);
     defer shell.deinit();
 
     var stdinBuffer: [1024]u8 = undefined;
-    var stdoutBuffer: [1024]u8 = undefined;
+    var stderrBuffer: [1024]u8 = undefined;
     var stdin = std.fs.File.stdin().reader(&stdinBuffer);
-    var stdout = std.fs.File.stdout().writer(&stdoutBuffer);
+    var stderr = std.fs.File.stderr().writer(&stderrBuffer);
 
     const reader = &stdin.interface;
-    const writer = &stdout.interface;
+    const writer = &stderr.interface;
+
+    var tty = try nerd.Tty.init();
+    defer tty.deinit();
+
+    try tty.enter_raw_mode();
+
+    try nerd.init(allocator, stderr, tty);
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -1456,6 +1469,10 @@ pub fn main() !void {
     try writer.print("The slack message was copied to your clipboard.\n", .{});
     try writer.print("{s}\n", .{message});
     try writer.flush();
+
+    while (true) {
+        try nerd.update();
+    }
 }
 
 test "Shell keeps child shell alive between commands" {
